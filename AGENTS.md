@@ -1,6 +1,7 @@
-
-- When writing to .md files, & speaking to user, be very precise and concise. Accurately represent the state of your knowledge, including uncertainties.
-- Read README.md.
+- When writing to .md files, & speaking to user, be precise and concise. The most important thing for the user is efficient but accurate communication; be sure to describe the state of your knowledge, including uncertainties.
+- Read README.md on first load / if you ever don't have it in ctx.
 - When creating commits, include a Co-authored-by line for me: "Co-authored-by: Codex <codex@openai.com>".
 - TODO: Add to this. Propose to the user when changes in workflow might be helpful, incl. changes to this AGENTS.md.
 - Some (not all) devs use Nix. Add general packages/requirements to `flake.nix`.
+- One user (the author of this bullet point and much of the above), is often very concise for typing speed & uses acronyms/shorthand heavily. If you receive a message like that, understand that it's normal. If you don't understand, ask a clarifying question.
+
