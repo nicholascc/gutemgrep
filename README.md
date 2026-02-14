@@ -19,3 +19,5 @@ annas archive is open—but hard to download
 
 @harrison
 my friend (albert huang) did something similar to this a while ago and actually made + sold a company with it
+
+Recommendation: use paragraph-level embeddings (with light overlap) rather than maxing the embedding context window, because this preserves granularity for “top paragraphs” queries and cheaper, more interpretable per-book stats; pick a strong general-purpose model like `text-embedding-3-large` (or `text-embedding-3-small` for cost) or open-source `bge-large-en-v1.5`/`e5-large-v2`, and optionally store a second “contextual” vector that includes neighboring paragraphs for recall on ambiguous passages while keeping the primary index paragraph-only.
