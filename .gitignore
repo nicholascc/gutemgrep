@@ -9,3 +9,6 @@ backend/__pycache__/
 *.db
 *.db-wal
 *.db-shm
+processed_gutenberg.tar.gz
+gutenberg/.log.*
+gutenberg/src/nltk_data/

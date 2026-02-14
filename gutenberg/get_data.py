@@ -14,6 +14,7 @@ import argparse
 import os
 import subprocess
 import pickle
+import concurrent.futures as cf
 
 if __name__ == '__main__':
 
@@ -62,6 +63,26 @@ if __name__ == '__main__':
         action="store_true",
         help="Overwrite files in raw.")
 
+    # mirror url
+    parser.add_argument(
+        "--mirror_url",
+        help="Rsync mirror URL (module), e.g. 'gutenberg.pglaf.org::gutenberg'",
+        default="gutenberg.pglaf.org::gutenberg",
+        type=str)
+
+    # parallel rsync workers (prefix-sharded by top-level digit dirs)
+    parser.add_argument(
+        "-w", "--workers",
+        help="Number of parallel rsync workers (default: 1)",
+        default=1,
+        type=int)
+
+    parser.add_argument(
+        "--prefixes",
+        help="Comma-separated top-level directory prefixes to rsync (default: 0-9)",
+        default="0,1,2,3,4,5,6,7,8,9",
+        type=str)
+
     # quiet argument, to supress info
     parser.add_argument(
         "-q", "--quiet",
@@ -99,13 +120,23 @@ if __name__ == '__main__':
     # + 12345 -   0   .  t x                 t 
     #---------------------------------------------
     #        [.-][t0][x.]t[x.]    *         [t8]
-    sp_args = ["rsync", "-am%s" % vstring,
-               "--include", "*/",
-               "--include", "[p123456789][g0123456789]%s[.-][t0][x.]t[x.]*[t8]" % args.pattern,
-               "--exclude", "*",
-               "aleph.gutenberg.org::gutenberg", args.mirror
-               ]
-    subprocess.call(sp_args)
+    def _rsync_prefix(prefix):
+        src = "%s/%s" % (args.mirror_url, prefix) if prefix is not None else args.mirror_url
+        sp_args = ["rsync", "-am%s" % vstring,
+                   "--include", "*/",
+                   "--include", "[p123456789][g0123456789]%s[.-][t0][x.]t[x.]*[t8]" % args.pattern,
+                   "--exclude", "*",
+                   src, args.mirror
+                   ]
+        return subprocess.call(sp_args)
+
+    prefixes = [p.strip() for p in args.prefixes.split(",") if p.strip() != ""]
+    if args.workers <= 1 or len(prefixes) <= 1:
+        for p in prefixes:
+            _rsync_prefix(p)
+    else:
+        with cf.ThreadPoolExecutor(max_workers=args.workers) as ex:
+            list(ex.map(_rsync_prefix, prefixes))
 
     # Get rid of duplicates
     # ---------------------

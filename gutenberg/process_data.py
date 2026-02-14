@@ -11,9 +11,41 @@ import argparse
 import glob
 import ast
 import pandas as pd
+import time
+import traceback
+import concurrent.futures as cf
 
 from src.pipeline import process_book
 from src.utils import get_langs_dict
+
+def _outputs_exist(pg_number, text_dir, tokens_dir, counts_dir):
+    return (
+        os.path.isfile(os.path.join(text_dir, "PG%s_text.txt" % pg_number)) and
+        os.path.isfile(os.path.join(tokens_dir, "PG%s_tokens.txt" % pg_number)) and
+        os.path.isfile(os.path.join(counts_dir, "PG%s_counts.txt" % pg_number))
+    )
+
+
+def _process_single(filename, language, text_dir, tokens_dir, counts_dir, log_file, per_process_log, needed):
+    try:
+        if needed:
+            if per_process_log and log_file != "":
+                log_path = "%s.%d" % (log_file, os.getpid())
+            else:
+                log_path = log_file
+            process_book(
+                path_to_raw_file=filename,
+                text_dir=text_dir,
+                tokens_dir=tokens_dir,
+                counts_dir=counts_dir,
+                language=language,
+                log_file=log_path
+            )
+        return (filename, None, None, needed)
+    except UnicodeDecodeError:
+        return (filename, "unicode", None, needed)
+    except Exception:
+        return (filename, "exception", traceback.format_exc(), needed)
 
 
 if __name__ == '__main__':
@@ -51,12 +83,25 @@ if __name__ == '__main__':
         help="Patttern to specify a subset of books",
         default='*',
         type=str)
+    # skip recently modified raw files (avoid partial rsync writes)
+    parser.add_argument(
+        "--min_age_seconds",
+        help="Skip raw files modified within the last N seconds",
+        default=0,
+        type=int)
 
     # quiet argument, to supress info
     parser.add_argument(
         "-q", "--quiet",
         action="store_true",
         help="Quiet mode, do not print info, warnings, etc"
+    )
+    # workers
+    parser.add_argument(
+        "-w", "--workers",
+        help="Number of worker processes (default: CPU count)",
+        default=os.cpu_count() or 1,
+        type=int
     )
 
     # log file
@@ -86,42 +131,95 @@ if __name__ == '__main__':
     # load languages dict
     langs_dict = get_langs_dict()
 
-    # loop over all books in the raw-folder
-    pbooks = 0
+    # build job list
+    jobs = []
     for filename in glob.glob(join(args.raw, 'PG%s_raw.txt' % (args.pattern))):
-        # The process_books function will fail very rarely, whne
-        # a file tagged as UTf-8 is not really UTF-8. We kust
-        # skip those books.
+        if args.min_age_seconds > 0:
+            mtime = os.path.getmtime(filename)
+            if (time.time() - mtime) < args.min_age_seconds:
+                if not args.quiet:
+                    print("# WARNING: skipping recently modified '%s'" % filename)
+                continue
+        PG_id = filename.split("/")[-1].split("_")[0]
         try:
-            # get PG_id
-            PG_id = filename.split("/")[-1].split("_")[0]
-
-            # get language from metadata
-            # default is english
             language = "english"
-            # language is a string representing a list of languages codes
             lang_id = ast.literal_eval(metadata.loc[PG_id, "language"])[0]
             if lang_id in langs_dict.keys():
                 language = langs_dict[lang_id]
-
-            # process the book: strip headers, tokenize, count
-            process_book(
-                path_to_raw_file=filename,
-                text_dir=args.output_text,
-                tokens_dir=args.output_tokens,
-                counts_dir=args.output_counts,
-                language=language,
-                log_file=args.log_file
-            )
-            pbooks += 1
-            if not args.quiet:
-                print("Processed %d books..." % pbooks, end="\r")
-        except UnicodeDecodeError:
-            if not args.quiet:
-                print("# WARNING: cannot process '%s' (encoding not UTF-8)" % filename)
+            pg_number = PG_id[2:]
+            needed = not _outputs_exist(pg_number, args.output_text, args.output_tokens, args.output_counts)
+            jobs.append((filename, language, needed))
         except KeyError:
             if not args.quiet:
                 print("# WARNING: metadata for '%s' not found" % filename)
-        except Exception as e:
+        except Exception:
             if not args.quiet:
-                print("# WARNING: cannot process '%s' (unkown error)" % filename)
+                print("# WARNING: cannot process '%s' (unknown error during setup)" % filename)
+                traceback.print_exc()
+
+    # process jobs
+    pbooks = 0
+    new_books = 0
+    skipped_existing = 0
+    if args.workers <= 1:
+        for filename, language, needed in jobs:
+            fname, status, err, needed = _process_single(
+                filename,
+                language,
+                args.output_text,
+                args.output_tokens,
+                args.output_counts,
+                args.log_file,
+                False,
+                needed
+            )
+            if status is None:
+                pbooks += 1
+                if needed:
+                    new_books += 1
+                else:
+                    skipped_existing += 1
+                if not args.quiet:
+                    print("Processed %d books (new: %d, skipped: %d)..." % (pbooks, new_books, skipped_existing), end="\r")
+            elif status == "unicode":
+                if not args.quiet:
+                    print("# WARNING: cannot process '%s' (encoding not UTF-8)" % fname)
+            else:
+                if not args.quiet:
+                    print("# WARNING: cannot process '%s' (unknown error)" % fname)
+                    if err:
+                        print(err, end="" if err.endswith("\n") else "\n")
+    else:
+        with cf.ProcessPoolExecutor(max_workers=args.workers) as ex:
+            fut_to_file = {
+                ex.submit(
+                    _process_single,
+                    filename,
+                    language,
+                    args.output_text,
+                    args.output_tokens,
+                    args.output_counts,
+                    args.log_file,
+                    True,
+                    needed
+                ): filename
+                for filename, language, needed in jobs
+            }
+            for fut in cf.as_completed(fut_to_file):
+                fname, status, err, needed = fut.result()
+                if status is None:
+                    pbooks += 1
+                    if needed:
+                        new_books += 1
+                    else:
+                        skipped_existing += 1
+                    if not args.quiet:
+                        print("Processed %d books (new: %d, skipped: %d)..." % (pbooks, new_books, skipped_existing), end="\r")
+                elif status == "unicode":
+                    if not args.quiet:
+                        print("# WARNING: cannot process '%s' (encoding not UTF-8)" % fname)
+                else:
+                    if not args.quiet:
+                        print("# WARNING: cannot process '%s' (unknown error)" % fname)
+                        if err:
+                            print(err, end="" if err.endswith("\n") else "\n")

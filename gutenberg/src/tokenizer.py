@@ -4,8 +4,19 @@
    You will get a list of tokens
 """
 
+import os
 import nltk
-nltk.data.path=["src/nltk_data"]
+
+_NLTK_DATA_DIR = os.path.join(os.path.dirname(__file__), "nltk_data")
+nltk.data.path = [_NLTK_DATA_DIR]
+
+def _ensure_punkt_tab():
+    try:
+        nltk.data.find("tokenizers/punkt_tab/english/")
+    except LookupError:
+        nltk.download("punkt_tab", download_dir=_NLTK_DATA_DIR, quiet=True)
+
+_ensure_punkt_tab()
 
 from nltk.tokenize.treebank import TreebankWordTokenizer
 from nltk.tokenize import sent_tokenize

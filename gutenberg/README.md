@@ -42,6 +42,8 @@ python get_data.py
 ```
 This will download a copy of all UTF-8 books in PG and will create a csv file with metadata (e.g. author, title, year, ...).
 
+Note: You can run `process_data.py` while downloads are in progress, but avoid partially synced files. Use `--min_age_seconds N` (e.g. 600) to skip raw files modified within the last N seconds.
+
 Notice that if you already have some of the data, the program will only download those you are missing (we use `rsync` for this). It is hence easy to update the dataset periodically to keep it up-to-date by just running `get_data.py`.
 
 
@@ -51,6 +53,5 @@ To process all the data in the `raw/` directory, run
 python process_data.py
 ```
 This will fill in the `text/`, `tokens/` and `counts/` folders.
-
 
 
