@@ -4,6 +4,14 @@ import { defineConfig } from "vite";
 export default defineConfig({
   plugins: [react()],
   base: "/static/",
+  server: {
+    proxy: {
+      "/query": "http://127.0.0.1:5000",
+      "/api": "http://127.0.0.1:5000",
+      "/book": "http://127.0.0.1:5000",
+      "/health": "http://127.0.0.1:5000"
+    }
+  },
   build: {
     outDir: "../static",
     emptyOutDir: true,
@@ -20,4 +28,3 @@ export default defineConfig({
     }
   }
 });
-

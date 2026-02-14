@@ -36,6 +36,11 @@ From the repo root:
 
 1. Install Python deps:
    - `uv sync`
+2. (Optional) Create a tiny fake Gutenberg dataset:
+   - `python gutenberg/make_fake_dataset.py`
+3. (Optional) Build `embedding.db` from the fake dataset (calls OpenAI embeddings API):
+   - `export OPENAI_API_KEY=...`
+   - `python tools/build_embedding_db.py --overwrite`
 2. Build the frontend into `static/`:
    - `cd frontend`
    - `npm install`
@@ -44,7 +49,7 @@ From the repo root:
 3. Configure env vars:
    - `export FLASK_APP=./backend/app.py`
    - `export STATIC_DIR=./static`
-   - `export OPENAI_API_KEY=...` (required for `POST /query`)
+   - `export OPENAI_API_KEY=...` (required for `POST /query`, and for `tools/build_embedding_db.py`)
    - Optional:
      - `export EMBEDDING_DB_PATH=./embedding.db`
      - `export QUERIES_DB_PATH=./queries.db`
@@ -61,6 +66,32 @@ Notes:
 - You need a populated `embedding.db` table (default `embeddings`) for search to return results.
 
 ---
+
+## Building `embedding.db` (Dev)
+
+The backend searches `embedding.db` (SQLite) for a table (default `embeddings`) with:
+
+- `embed_id` (INTEGER PRIMARY KEY)
+- `paragraph_text` (TEXT)
+- `prev_embed_id` (INTEGER nullable)
+- `next_embed_id` (INTEGER nullable)
+- `embedding` (BLOB; `float32` bytes)
+- `book_title` (TEXT nullable)
+- `book_id` (INTEGER nullable)
+
+This repo includes a minimal dev pipeline:
+
+1. Generate fake Gutenberg “processed” text files:
+   - `python gutenberg/make_fake_dataset.py`
+2. Embed paragraphs and write `embedding.db`:
+   - `export OPENAI_API_KEY=...`
+   - `python tools/build_embedding_db.py --overwrite`
+
+Defaults:
+- Reads from `gutenberg/data/text/`
+- Uses `gutenberg/metadata/metadata.csv` for `book_title` (if present)
+- Writes `embedding.db` at repo root
+- Uses `OPENAI_EMBED_MODEL` (default `text-embedding-3-small`)
 
 ## Architecture Overview
 

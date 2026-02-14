@@ -79,20 +79,19 @@ function SearchPage() {
   const [topK, setTopK] = useState(10);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [data, setData] = useState(null);
 
   async function runSearch(e) {
     e?.preventDefault?.();
     setError("");
     setLoading(true);
-    setData(null);
     try {
       const safeTopK = Number.isFinite(topK) ? topK : 10;
       const resp = await postQuery({ query, topK: safeTopK, includeContext: true });
-      setData(resp);
-      if (resp?.uuid) {
-        window.history.replaceState({}, "", "/");
-      }
+      const uuid = resp?.uuid ? String(resp.uuid) : "";
+      if (!uuid) throw new Error("Missing uuid in response");
+
+      // Prefer loading results from the persisted query (queries.db) to match the share URL flow.
+      window.location.assign(`/${encodeURIComponent(uuid)}`);
     } catch (err) {
       setError(err?.message || "Search failed");
     } finally {
@@ -141,8 +140,6 @@ function SearchPage() {
 
           {error ? <div className="error">{error}</div> : null}
         </form>
-
-        {data ? <ResultsView uuid={data.uuid} results={data.results || []} /> : null}
       </main>
     </div>
   );

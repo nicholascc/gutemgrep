@@ -362,7 +362,9 @@ def create_app() -> Flask:
         static_dir=_env_optional_path("STATIC_DIR", root=root),
     )
 
-    app = Flask(__name__)
+    # Disable Flask's built-in static route (/static/...) so our explicit
+    # `/static/<path:filename>` handler can serve from `STATIC_DIR`.
+    app = Flask(__name__, static_folder=None)
     app.config["APP_CONFIG"] = config
 
     @app.get("/health")
