@@ -153,6 +153,92 @@ The slug maps to the UUID on the backend. The `aesthetic_url` column in `queries
 | `GET /<uuid>` | Retrieve saved query results | |
 | `GET /<aesthetic-slug>` | Resolve slug → UUID → results | |
 
+### Current Backend Details (Implemented)
+
+Backend lives at `backend/app.py`.
+
+#### Configuration (env vars)
+
+- `OPENAI_API_KEY` (required for `POST /query`)
+- `EMBEDDING_DB_PATH` (default `./embedding.db`)
+- `QUERIES_DB_PATH` (default `./queries.db`)
+- `EMBEDDINGS_TABLE` (default `embeddings`)
+- `OPENAI_EMBED_MODEL` (default `text-embedding-3-small`)
+- `DEFAULT_TOP_K` (default `10`)
+- `STATIC_DIR` (optional; if set, `GET /` serves `index.html` from here and `GET /static/<path>` serves other files)
+
+#### Routes
+
+- `GET /health`: returns basic config + `ok: true`.
+- `GET /`: if `STATIC_DIR` is set, serves `index.html`; otherwise returns a small JSON message.
+- `GET /static/<path:filename>`: serves static files from `STATIC_DIR` (only if set).
+- `POST /query`: embeds the query via OpenAI, brute-force cosine similarity against all rows in `embedding.db`, returns top-k results, and persists the query + results into `queries.db`.
+- `GET /<token>`: loads saved results by UUID; if the `queries` table has an `aesthetic_url` column it will also try resolving `token` as a slug.
+- `GET /book/by-embed/<embed_id>`: finds the `book_id` for that `embed_id`, then returns all paragraphs for the book (ordered by `embed_id`).
+
+#### `POST /query` request/response
+
+Request JSON:
+
+- `query` (string, required). (`text` is also accepted as an alias.)
+- `top_k` (int, optional; default `DEFAULT_TOP_K`, clamped to `[1, 100]`)
+- `include_context` (bool, optional; default `true`)
+
+Response JSON:
+
+```json
+{
+  "uuid": "…",
+  "results": [
+    {
+      "embed_id": 123,
+      "score": 0.42,
+      "paragraph_text": "…",
+      "prev_text": "…",
+      "next_text": "…",
+      "book_title": "…",
+      "book_id": 1342
+    }
+  ]
+}
+```
+
+Notes:
+
+- Similarity is cosine similarity on `float32` vectors loaded from the `embedding` BLOB.
+- If `include_context` is `false`, the response omits `prev_text`/`next_text`.
+
+#### Persistence (`queries.db`)
+
+On each `POST /query`, `backend/app.py` ensures (creates if missing) these tables:
+
+- `queries` with columns:
+  - `uuid` (TEXT PRIMARY KEY)
+  - `embed_id` (INTEGER; the top result embed id)
+  - `request_body` (TEXT; JSON)
+  - `response_body` (TEXT; JSON) (optional; used if the column exists)
+  - `aesthetic_url` (TEXT nullable) (not generated right now; only used for lookup if present)
+  - `created_at` (DATETIME; ISO8601 UTC)
+- `query_results` with columns:
+  - `uuid` (TEXT)
+  - `rank` (INTEGER)
+  - `embed_id` (INTEGER)
+  - `score` (REAL)
+
+`GET /<token>` never calls OpenAI: it returns saved results. If `queries.response_body` exists and is populated, it is returned directly; otherwise results are rehydrated from `query_results` + `embedding.db` (to include paragraph/context/book metadata).
+
+#### Embedding DB assumptions (`embedding.db`)
+
+The search code expects a table (default name `embeddings`) with these columns:
+
+- `embed_id` (INTEGER PRIMARY KEY)
+- `paragraph_text` (TEXT)
+- `prev_embed_id` (INTEGER nullable)
+- `next_embed_id` (INTEGER nullable)
+- `embedding` (BLOB; `float32` bytes, dimension inferred from length)
+- `book_title` (TEXT nullable)
+- `book_id` (INTEGER nullable)
+
 ---
 
 ## 8. Tech Stack
@@ -176,3 +262,11 @@ The slug maps to the UUID on the backend. The `aesthetic_url` column in `queries
 - **Aesthetic URL generation:** Which tiny LLM to use for slug generation? Could be a small local model or a cheap API call.
 - **Caching:** Cache query embeddings to avoid redundant OpenAI calls for repeated queries.
 - **Frontend polish:** Result highlighting, reading mode, book-level browsing.
+
+---
+
+## Implementation Notes (Current)
+
+- React frontend lives in `frontend/` (Vite).
+- `npm run build` outputs to `static/` with assets served by Flask at `/static/...` (set `STATIC_DIR=.../gutemgrep/static`).
+- `GET /<uuid>` renders a Jinja template (`backend/templates/uuid.html`) which loads the React bundle; the page fetches saved results from `GET /api/query/<token>`.
