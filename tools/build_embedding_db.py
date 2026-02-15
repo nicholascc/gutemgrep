@@ -111,10 +111,11 @@ def _iter_paragraphs_from_file(path: Path, *, min_tokens: int, min_chars: int) -
         yield prev_chunk
 
 
-def _load_titles(metadata_csv: Path) -> dict[int, str]:
+def _load_metadata(metadata_csv: Path) -> tuple[dict[int, str], dict[int, int]]:
     if not metadata_csv.exists():
-        return {}
+        return {}, {}
     by_book_id: dict[int, str] = {}
+    downloads_by_id: dict[int, int] = {}
     with metadata_csv.open("r", encoding="utf-8", newline="") as f:
         r = csv.DictReader(f)
         for row in r:
@@ -128,7 +129,13 @@ def _load_titles(metadata_csv: Path) -> dict[int, str]:
             title = (row.get("title") or "").strip()
             if title:
                 by_book_id[book_id] = title
-    return by_book_id
+            downloads_raw = (row.get("downloads") or "").strip()
+            if downloads_raw:
+                try:
+                    downloads_by_id[book_id] = int(float(downloads_raw))
+                except Exception:
+                    continue
+    return by_book_id, downloads_by_id
 
 
 def _embed_batch(*, api_key: str, model: str, task: str, texts: list[str]) -> tuple[list[np.ndarray], int]:
@@ -339,7 +346,7 @@ def main() -> None:
     if not text_dir.exists():
         raise SystemExit(f"Missing text dir: {text_dir}")
 
-    titles = _load_titles(metadata_csv)
+    titles, downloads_by_id = _load_metadata(metadata_csv)
 
     out_db.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(str(out_db)) as conn:
@@ -360,6 +367,14 @@ def main() -> None:
 
         max_books = max(0, int(args.max_books))
         text_files = list(_iter_text_files(text_dir))
+        if downloads_by_id:
+            by_popularity = sorted(
+                ((bid, downloads_by_id.get(bid, -1)) for bid, _ in text_files),
+                key=lambda item: item[1],
+                reverse=True,
+            )
+            top_popular_ids = {bid for bid, _ in by_popularity[:2000]}
+            text_files.sort(key=lambda item: (item[0] not in top_popular_ids, -downloads_by_id.get(item[0], -1)))
         if max_books:
             text_files = text_files[:max_books]
         total_books = len(text_files)
