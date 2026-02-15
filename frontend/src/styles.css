@@ -22,3 +22,35 @@ input::placeholder {
 ::-webkit-scrollbar { width: 4px; height: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: rgba(180, 165, 140, 0.15); border-radius: 2px; }
+
+/* Dark mode checkboxes */
+input[type="checkbox"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 15px;
+  height: 15px;
+  border: 1.5px solid rgba(200, 185, 160, 0.25);
+  border-radius: 3px;
+  background: rgba(18, 16, 24, 0.6);
+  cursor: pointer;
+  position: relative;
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+input[type="checkbox"]:hover {
+  border-color: rgba(200, 185, 160, 0.45);
+}
+input[type="checkbox"]:checked {
+  background: rgba(200, 185, 160, 0.2);
+  border-color: rgba(200, 185, 160, 0.5);
+}
+input[type="checkbox"]:checked::after {
+  content: '';
+  position: absolute;
+  left: 3.5px;
+  top: 1px;
+  width: 4.5px;
+  height: 8px;
+  border: solid rgba(225, 215, 195, 0.85);
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg);
+}

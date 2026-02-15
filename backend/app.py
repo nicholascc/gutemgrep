@@ -382,7 +382,8 @@ def _embedding_rows(
           e.next_embed_id,
           e.embedding,
           e.book_title,
-          e.book_id
+          e.book_id,
+          bm.author
         FROM {table} AS e
         JOIN book_metadata AS bm ON e.book_id = bm.book_id
         WHERE e.embedding IS NOT NULL AND {_book_filter_sql('bm')}
@@ -525,14 +526,16 @@ def _search_embeddings_ann(
         rows = conn.execute(
             f"""
             SELECT
-              embed_id,
-              paragraph_text,
-              prev_embed_id,
-              next_embed_id,
-              book_title,
-              book_id
-            FROM {embeddings_table}
-            WHERE embed_id IN ({placeholders})
+              e.embed_id,
+              e.paragraph_text,
+              e.prev_embed_id,
+              e.next_embed_id,
+              e.book_title,
+              e.book_id,
+              bm.author
+            FROM {embeddings_table} AS e
+            JOIN book_metadata AS bm ON e.book_id = bm.book_id
+            WHERE e.embed_id IN ({placeholders})
             """,
             ids,
         ).fetchall()
@@ -552,6 +555,7 @@ def _search_embeddings_ann(
                     "next_embed_id": int(row["next_embed_id"]) if row["next_embed_id"] is not None else None,
                     "book_title": str(row["book_title"]) if row["book_title"] is not None else None,
                     "book_id": int(row["book_id"]) if row["book_id"] is not None else None,
+                    "author": str(row["author"]) if row["author"] is not None else None,
                 }
             )
 
@@ -621,6 +625,7 @@ def _search_embeddings(
                         "next_embed_id": int(row["next_embed_id"]) if row["next_embed_id"] is not None else None,
                         "book_title": str(row["book_title"]) if row["book_title"] is not None else None,
                         "book_id": int(row["book_id"]) if row["book_id"] is not None else None,
+                        "author": str(row["author"]) if row["author"] is not None else None,
                     },
                 )
             )
@@ -768,14 +773,16 @@ def _load_saved_query(
             rows = econn.execute(
                 f"""
                 SELECT
-                  embed_id,
-                  paragraph_text,
-                  prev_embed_id,
-                  next_embed_id,
-                  book_title,
-                  book_id
-                FROM {embeddings_table}
-                WHERE embed_id IN ({placeholders})
+                  e.embed_id,
+                  e.paragraph_text,
+                  e.prev_embed_id,
+                  e.next_embed_id,
+                  e.book_title,
+                  e.book_id,
+                  bm.author
+                FROM {embeddings_table} AS e
+                LEFT JOIN book_metadata AS bm ON e.book_id = bm.book_id
+                WHERE e.embed_id IN ({placeholders})
                 """,
                 embed_ids,
             ).fetchall()
@@ -806,6 +813,7 @@ def _load_saved_query(
                     "next_text": neighbor_text.get(next_id) if next_id is not None else None,
                     "book_title": str(erow["book_title"]) if erow["book_title"] is not None else None,
                     "book_id": int(erow["book_id"]) if erow["book_id"] is not None else None,
+                    "author": str(erow["author"]) if erow["author"] is not None else None,
                 }
             )
 
