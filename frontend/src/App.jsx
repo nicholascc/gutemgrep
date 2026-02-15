@@ -1005,57 +1005,9 @@ function ResultCard({ result, index, onTextSelect, onExpand, onCollect, collecte
   );
 }
 
-// ─── Floating Card (lifted passage during transition) ────────────────────────
-
-function FloatingCard({ result, rect, target, phase, highlightPos }) {
-  if (!result || !rect) return null;
-
-  const MOVE_MS = 400;
-  const isAtTarget = target === "center";
-
-  const prevTextHeight = result.prev_text ? 58 : 0;
-  const originTop = rect.top + 28 + prevTextHeight;
-  const originLeft = rect.left + 32;
-  const originWidth = rect.width - 64;
-
-  const targetTop = highlightPos ? highlightPos.top : window.innerHeight * 0.3;
-  const targetLeft = highlightPos ? highlightPos.left : originLeft;
-  const targetWidth = highlightPos ? highlightPos.width : originWidth;
-
-  const currentTop = isAtTarget ? targetTop : originTop;
-  const currentLeft = isAtTarget ? targetLeft : originLeft;
-  const currentWidth = isAtTarget ? targetWidth : originWidth;
-
-  let opacity = 1;
-  if (phase === "book-enter") opacity = 0;
-
-  return (
-    <div style={{
-      position: "fixed",
-      top: currentTop,
-      left: currentLeft,
-      width: currentWidth,
-      zIndex: 11,
-      pointerEvents: "none",
-      opacity,
-      transition: `top ${MOVE_MS}ms cubic-bezier(0.4, 0, 0.2, 1), left ${MOVE_MS}ms cubic-bezier(0.4, 0, 0.2, 1), width ${MOVE_MS}ms cubic-bezier(0.4, 0, 0.2, 1), opacity 200ms ease`,
-    }}>
-      <p style={{
-        fontFamily: FONT, fontSize: 18.5, lineHeight: 1.8,
-        color: PARCHMENT(0.92), margin: 0, letterSpacing: "0.01em",
-      }}>
-        {renderFormatted(result.paragraph_text)}
-      </p>
-    </div>
-  );
-}
-
 // ─── Main App ────────────────────────────────────────────────────────────────
 
-const CURTAIN_MS = 380;
-const CARD_MOVE_MS = 400;
-const CONTENT_MS = 300;
-const CARD_BG = "rgba(22, 20, 28, 1)";
+const FADE_MS = 200;
 
 export default function GutemGrep() {
   const token = useInitialToken();
@@ -1072,11 +1024,7 @@ export default function GutemGrep() {
   const [vectors, setVectors] = useState([]);
   const [vectorsOpen, setVectorsOpen] = useState(false);
   const [expandedResult, setExpandedResult] = useState(null);
-  const [viewPhase, setViewPhase] = useState("search");
-  const [cardRect, setCardRect] = useState(null);
-  const [curtainTarget, setCurtainTarget] = useState(null);
-  const [floatingTarget, setFloatingTarget] = useState("origin");
-  const [highlightPos, setHighlightPos] = useState(null);
+  const [viewPhase, setViewPhase] = useState("search"); // "search" | "fade-out" | "book" | "fade-out-book"
   const [loadingToken, setLoadingToken] = useState(!!token);
   const timersRef = useRef([]);
   const inputRef = useRef(null);
@@ -1139,54 +1087,23 @@ export default function GutemGrep() {
   }, [token]);
 
   // ── EXPAND ──
-  const doExpand = useCallback((result, rect) => {
+  const doExpand = useCallback((result, _rect) => {
     clearTimers();
     setSelectionTooltip({ text: null, position: null });
     setExpandedResult(result);
-    setCardRect(rect || { top: window.innerHeight / 3, left: window.innerWidth / 4, width: window.innerWidth / 2, height: 200 });
-    setFloatingTarget("origin");
-    setHighlightPos(null);
-    setCurtainTarget("card");
-    setViewPhase("curtain-grow");
-
-    requestAnimationFrame(() => requestAnimationFrame(() => setCurtainTarget("full")));
-
-    later(() => {
-      setViewPhase("card-settle");
-      setFloatingTarget("center");
-
-      later(() => {
-        setViewPhase("book-enter");
-
-        later(() => setViewPhase("book"), CONTENT_MS);
-      }, CARD_MOVE_MS);
-    }, CURTAIN_MS);
+    setViewPhase("fade-out");
+    later(() => setViewPhase("book"), FADE_MS);
   }, []);
 
-  // ── COLLAPSE (exact inverse) ──
+  // ── COLLAPSE ──
   const doCollapse = useCallback(() => {
     clearTimers();
     setSelectionTooltip({ text: null, position: null });
-
-    setFloatingTarget("center");
-    setViewPhase("book-exit");
-
+    setViewPhase("fade-out-book");
     later(() => {
-      setViewPhase("card-return");
-      setFloatingTarget("origin");
-
-      later(() => {
-        setViewPhase("curtain-shrink");
-        setCurtainTarget("card");
-
-        later(() => {
-          setViewPhase("search");
-          setExpandedResult(null);
-          setCurtainTarget(null);
-          setCardRect(null);
-        }, CURTAIN_MS);
-      }, CARD_MOVE_MS);
-    }, CONTENT_MS);
+      setViewPhase("search");
+      setExpandedResult(null);
+    }, FADE_MS);
   }, []);
 
   useEffect(() => () => clearTimers(), []);
@@ -1200,10 +1117,6 @@ export default function GutemGrep() {
     setSelectionTooltip({ text: null, position: null });
     setExpandedResult(null);
     setViewPhase("search");
-    setCurtainTarget(null);
-    setCardRect(null);
-    setFloatingTarget("origin");
-    setHighlightPos(null);
 
     try {
       const resp = await postQuery({ query: searchText, topK: 10, includeContext: true });
@@ -1227,10 +1140,6 @@ export default function GutemGrep() {
     setSelectionTooltip({ text: null, position: null });
     setExpandedResult(null);
     setViewPhase("search");
-    setCurtainTarget(null);
-    setCardRect(null);
-    setFloatingTarget("origin");
-    setHighlightPos(null);
     setVectorsOpen(false);
 
     try {
@@ -1327,35 +1236,9 @@ export default function GutemGrep() {
     });
   };
 
-  const handleHighlightMeasured = useCallback((pos) => {
-    setHighlightPos(pos);
-  }, []);
-
-  const showSearch = viewPhase === "search" || viewPhase === "curtain-grow" || viewPhase === "card-return" || viewPhase === "curtain-shrink";
-  const showBook = ["curtain-grow", "card-settle", "book-enter", "book", "book-exit"].includes(viewPhase);
-  const bookVisible = ["book-enter", "book", "book-exit"].includes(viewPhase);
-  const showCurtain = !["search", "book"].includes(viewPhase);
-  const showFloating = ["curtain-grow", "card-settle", "book-enter", "book-exit", "card-return", "curtain-shrink"].includes(viewPhase);
+  const showSearch = viewPhase === "search" || viewPhase === "fade-out";
+  const showBook = viewPhase === "book" || viewPhase === "fade-out-book";
   const isHome = results === null && viewPhase === "search" && !loadingToken;
-
-  const curtainStyle = (() => {
-    if (!cardRect) return {};
-    const isAtCard = curtainTarget === "card";
-    return {
-      position: "fixed",
-      zIndex: 10,
-      pointerEvents: "none",
-      background: CARD_BG,
-      border: `1px solid ${isAtCard ? WARM(0.1) : "transparent"}`,
-      borderRadius: isAtCard ? 3 : 0,
-      top: isAtCard ? cardRect.top : 0,
-      left: isAtCard ? cardRect.left : 0,
-      width: isAtCard ? cardRect.width : "100vw",
-      height: isAtCard ? cardRect.height : "100vh",
-      transition: `top ${CURTAIN_MS}ms cubic-bezier(0.4, 0, 0.2, 1), left ${CURTAIN_MS}ms cubic-bezier(0.4, 0, 0.2, 1), width ${CURTAIN_MS}ms cubic-bezier(0.4, 0, 0.2, 1), height ${CURTAIN_MS}ms cubic-bezier(0.4, 0, 0.2, 1), border-radius ${CURTAIN_MS}ms cubic-bezier(0.4, 0, 0.2, 1), border-color ${CURTAIN_MS}ms cubic-bezier(0.4, 0, 0.2, 1), box-shadow ${CURTAIN_MS}ms cubic-bezier(0.4, 0, 0.2, 1)`,
-      boxShadow: isAtCard ? `0 4px 40px rgba(0,0,0,0.3), inset 0 1px 0 ${WARM(0.05)}` : "none",
-    };
-  })();
 
   if (loadingToken) {
     return (
@@ -1371,14 +1254,6 @@ export default function GutemGrep() {
     <div style={{ minHeight: "100vh", background: "#060812", position: "relative", overflow: "hidden" }}>
       <StarField />
       <Vignette />
-
-      {/* ── CURTAIN ── */}
-      {showCurtain && cardRect && <div style={curtainStyle} />}
-
-      {/* ── FLOATING CARD ── */}
-      {showFloating && expandedResult && cardRect && (
-        <FloatingCard result={expandedResult} rect={cardRect} target={floatingTarget} phase={viewPhase} highlightPos={highlightPos} />
-      )}
 
       <SelectionTooltip
         text={selectionTooltip.text} position={selectionTooltip.position}
@@ -1415,6 +1290,8 @@ export default function GutemGrep() {
           <div style={{
             width: "100%", display: "flex", flexDirection: "column", alignItems: "center",
             pointerEvents: viewPhase === "search" ? "auto" : "none",
+            opacity: viewPhase === "fade-out" ? 0 : 1,
+            transition: `opacity ${FADE_MS}ms ease`,
           }}>
             <header style={{
               width: "100%", maxWidth: 680, padding: "0 24px",
@@ -1526,10 +1403,9 @@ export default function GutemGrep() {
         <div style={{
           position: "fixed", inset: 0,
           display: "flex", flexDirection: "column", alignItems: "center",
-          opacity: bookVisible ? 1 : 0,
-          pointerEvents: bookVisible ? "auto" : "none",
-          animation: viewPhase === "book-enter" ? `bookContentIn ${CONTENT_MS}ms cubic-bezier(0.16, 1, 0.3, 1) both` :
-                     viewPhase === "book-exit" ? `bookContentOut ${CONTENT_MS}ms cubic-bezier(0.7, 0, 0.84, 0) both` : "none",
+          opacity: viewPhase === "fade-out-book" ? 0 : 1,
+          pointerEvents: viewPhase === "book" ? "auto" : "none",
+          transition: `opacity ${FADE_MS}ms ease`,
           zIndex: 12,
         }}>
           <BookReader
@@ -1539,7 +1415,6 @@ export default function GutemGrep() {
             onCollapse={doCollapse}
             onTextSelect={handleTextSelect}
             onNavigateToSimilar={handleNavigateToSimilar}
-            onHighlightMeasured={handleHighlightMeasured}
             onCollect={handleCollect}
             collectedIds={collectedIds}
           />
