@@ -111,10 +111,10 @@ def _iter_paragraphs_from_file(path: Path, *, min_tokens: int, min_chars: int) -
         yield prev_chunk
 
 
-def _load_titles(metadata_csv: Path) -> dict[int, str]:
+def _load_book_meta(metadata_csv: Path) -> dict[int, tuple[Optional[str], Optional[str]]]:
     if not metadata_csv.exists():
         return {}
-    by_book_id: dict[int, str] = {}
+    by_book_id: dict[int, tuple[Optional[str], Optional[str]]] = {}
     with metadata_csv.open("r", encoding="utf-8", newline="") as f:
         r = csv.DictReader(f)
         for row in r:
@@ -125,9 +125,10 @@ def _load_titles(metadata_csv: Path) -> dict[int, str]:
                 book_id = int(raw_id[2:])
             except Exception:
                 continue
-            title = (row.get("title") or "").strip()
-            if title:
-                by_book_id[book_id] = title
+            title = (row.get("title") or "").strip() or None
+            author = (row.get("author") or "").strip() or None
+            if title or author:
+                by_book_id[book_id] = (title, author)
     return by_book_id
 
 
@@ -339,7 +340,7 @@ def main() -> None:
     if not text_dir.exists():
         raise SystemExit(f"Missing text dir: {text_dir}")
 
-    titles = _load_titles(metadata_csv)
+    meta = _load_book_meta(metadata_csv)
 
     out_db.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(str(out_db)) as conn:
@@ -375,6 +376,7 @@ def main() -> None:
         last_rate_time = start_time
         last_rate_books_done = 0
         rate_s_per_book: float | None = None
+        last_status_len = 0
         total_tokens = 0
         total_embed_s = 0.0
         total_insert_s = 0.0
@@ -426,20 +428,33 @@ def main() -> None:
                 return ""
             return f" ({rate_s_per_book:.1f}s/book)"
 
+        def _status_line(*, now: float) -> str:
+            elapsed_s = now - start_time
+            skipped_part = f" (skipped {books_skipped})" if books_skipped else ""
+            rate_part = _format_rate()
+            return (
+                f"{elapsed_s:7.1f}s | Books {books_done}/{total_books}{skipped_part}{rate_part} | "
+                f"Embedded {inserted} chunks | Tokens {total_tokens}"
+            )
+
+        def _clear_status_line() -> None:
+            nonlocal last_status_len
+            if last_status_len <= 0:
+                return
+            print("\r" + (" " * last_status_len) + "\r", end="", flush=True)
+            last_status_len = 0
+
         def _print_progress(*, force: bool = False) -> None:
-            nonlocal last_progress_print_time
+            nonlocal last_progress_print_time, last_status_len
             now = time.monotonic()
             if not force and (now - last_progress_print_time) < 0.5:
                 return
             last_progress_print_time = now
 
-            elapsed_s = now - start_time
-            skipped_part = f" (skipped {books_skipped})" if books_skipped else ""
-            rate_part = _format_rate()
-            print(
-                f"{elapsed_s:7.1f}s | Books {books_done}/{total_books}{skipped_part}{rate_part} | Embedded {inserted} chunks | Tokens {total_tokens}",
-                end="\r",
-            )
+            line = _status_line(now=now)
+            pad = max(0, last_status_len - len(line))
+            print("\r" + line + (" " * pad), end="", flush=True)
+            last_status_len = len(line)
 
         def insert_one_payload(res: EmbedResult) -> None:
             nonlocal inserted, total_tokens, total_embed_s, total_insert_s, total_batches
@@ -499,7 +514,7 @@ def main() -> None:
                         _print_progress(force=True)
                         continue
 
-                title = titles.get(book_id)
+                title, author = meta.get(book_id, (None, None))
 
                 if resume and not args.overwrite:
                     # If we previously crashed mid-book, remove any partial rows for this book
@@ -572,6 +587,18 @@ def main() -> None:
                 if checkpoint_frequency and (books_done % checkpoint_frequency == 0):
                     conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
+                if author and title:
+                    _clear_status_line()
+                    print(f"{author} — {title}", flush=True)
+                elif title:
+                    _clear_status_line()
+                    print(title, flush=True)
+                elif author:
+                    _clear_status_line()
+                    print(author, flush=True)
+                else:
+                    _clear_status_line()
+                    print(f"PG{int(book_id)}", flush=True)
                 _print_progress(force=True)
 
                 if max_paragraphs and seen >= max_paragraphs:
@@ -585,6 +612,7 @@ def main() -> None:
         if total_rows_int == 0:
             raise SystemExit(f"No chunks found in {text_dir}.")
 
+    # Ensure the final progress line doesn't get overwritten.
     print()
     print(
         f"OK: added {inserted} chunks; db has {total_rows_int} rows at {out_db} (table: {args.table}, model: {args.model}, task: {args.task})"
