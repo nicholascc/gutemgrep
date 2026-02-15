@@ -1,6 +1,7 @@
 import json
 import os
 import sqlite3
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -10,6 +11,11 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import numpy as np
 import requests
 from flask import Flask, Response, jsonify, render_template, request, send_from_directory
+
+try:
+    import hnswlib  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    hnswlib = None
 
 
 @dataclass(frozen=True)
@@ -22,6 +28,10 @@ class AppConfig:
     jina_embedding_task: str
     default_top_k: int
     static_dir: Optional[Path]
+    hnsw_enabled: bool
+    hnsw_m: int
+    hnsw_ef_construction: int
+    hnsw_ef_search: int
 
 
 def _repo_root() -> Path:
@@ -38,6 +48,13 @@ def _env_path(name: str, default: Path, *, root: Path) -> Path:
     return path
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def _env_optional_path(name: str, *, root: Path) -> Optional[Path]:
     value = os.environ.get(name)
     if not value:
@@ -52,6 +69,11 @@ def _connect_sqlite(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _file_signature(path: Path) -> Tuple[int, int]:
+    stat = path.stat()
+    return int(stat.st_mtime_ns), int(stat.st_size)
 
 
 def _table_names(conn: sqlite3.Connection) -> List[str]:
@@ -155,6 +177,152 @@ def _embedding_rows(
         FROM {table}
         """
     )
+
+
+def _build_hnsw_index(
+    *,
+    embedding_db_path: Path,
+    embeddings_table: str,
+    m: int,
+    ef_construction: int,
+    ef_search: int,
+) -> Tuple["hnswlib.Index", Tuple[int, int]]:
+    if hnswlib is None:
+        raise RuntimeError("hnswlib is not installed; disable HNSW or add the dependency.")
+    with _connect_sqlite(embedding_db_path) as conn:
+        if not _has_table(conn, embeddings_table):
+            raise RuntimeError(
+                f"Embedding DB missing table '{embeddings_table}'. Found: {_table_names(conn)}"
+            )
+
+        row = conn.execute(
+            f"SELECT length(embedding) AS blob_len FROM {embeddings_table} "
+            "WHERE embedding IS NOT NULL LIMIT 1"
+        ).fetchone()
+        if row is None or row["blob_len"] is None:
+            raise RuntimeError("No embeddings found to build HNSW index.")
+        blob_len = int(row["blob_len"])
+        if blob_len % 4 != 0:
+            raise RuntimeError(f"Unexpected embedding blob length: {blob_len}")
+        dim = blob_len // 4
+
+        count_row = conn.execute(
+            f"SELECT COUNT(*) AS n FROM {embeddings_table} WHERE embedding IS NOT NULL"
+        ).fetchone()
+        total = int(count_row["n"]) if count_row and count_row["n"] is not None else 0
+        if total <= 0:
+            raise RuntimeError("No embeddings found to build HNSW index.")
+
+        index = hnswlib.Index(space="cosine", dim=dim)
+        index.init_index(max_elements=total, ef_construction=ef_construction, M=m)
+
+        batch_ids: List[int] = []
+        batch_vecs: List[np.ndarray] = []
+        batch_size = 10000
+
+        for row in conn.execute(
+            f"SELECT embed_id, embedding FROM {embeddings_table} WHERE embedding IS NOT NULL"
+        ):
+            blob = row["embedding"]
+            if blob is None:
+                continue
+            vec = np.frombuffer(blob, dtype=np.float32)
+            if vec.size != dim:
+                continue
+            batch_ids.append(int(row["embed_id"]))
+            batch_vecs.append(vec)
+            if len(batch_ids) >= batch_size:
+                index.add_items(np.vstack(batch_vecs), np.asarray(batch_ids, dtype=np.int64))
+                batch_ids = []
+                batch_vecs = []
+
+        if batch_ids:
+            index.add_items(np.vstack(batch_vecs), np.asarray(batch_ids, dtype=np.int64))
+
+        index.set_ef(max(ef_search, 1))
+
+    return index, _file_signature(embedding_db_path)
+
+
+def _search_embeddings_ann(
+    *,
+    embedding_db_path: Path,
+    embeddings_table: str,
+    query_vec: np.ndarray,
+    top_k: int,
+    include_context: bool,
+    index: "hnswlib.Index",
+) -> List[Dict[str, Any]]:
+    if query_vec.ndim != 1:
+        query_vec = query_vec.reshape(-1)
+    k = max(1, top_k)
+    labels, distances = index.knn_query(query_vec, k=k)
+    ids = [int(i) for i in labels[0].tolist() if int(i) >= 0]
+    if not ids:
+        return []
+    scores = [1.0 - float(d) for d in distances[0].tolist()]
+    score_by_id = {eid: score for eid, score in zip(ids, scores)}
+
+    with _connect_sqlite(embedding_db_path) as conn:
+        if not _has_table(conn, embeddings_table):
+            raise RuntimeError(
+                f"Embedding DB missing table '{embeddings_table}'. Found: {_table_names(conn)}"
+            )
+        placeholders = ",".join(["?"] * len(ids))
+        rows = conn.execute(
+            f"""
+            SELECT
+              embed_id,
+              paragraph_text,
+              prev_embed_id,
+              next_embed_id,
+              book_title,
+              book_id
+            FROM {embeddings_table}
+            WHERE embed_id IN ({placeholders})
+            """,
+            ids,
+        ).fetchall()
+        by_id: Dict[int, sqlite3.Row] = {int(r["embed_id"]): r for r in rows}
+
+        ordered: List[Dict[str, Any]] = []
+        for eid in ids:
+            row = by_id.get(eid)
+            if row is None:
+                continue
+            ordered.append(
+                {
+                    "embed_id": int(row["embed_id"]),
+                    "score": float(score_by_id.get(eid, float("-inf"))),
+                    "paragraph_text": str(row["paragraph_text"]),
+                    "prev_embed_id": int(row["prev_embed_id"]) if row["prev_embed_id"] is not None else None,
+                    "next_embed_id": int(row["next_embed_id"]) if row["next_embed_id"] is not None else None,
+                    "book_title": str(row["book_title"]) if row["book_title"] is not None else None,
+                    "book_id": int(row["book_id"]) if row["book_id"] is not None else None,
+                }
+            )
+
+        if not include_context:
+            for item in ordered:
+                item.pop("prev_embed_id", None)
+                item.pop("next_embed_id", None)
+            return ordered
+
+        neighbor_ids: List[int] = []
+        for item in ordered:
+            if item.get("prev_embed_id") is not None:
+                neighbor_ids.append(int(item["prev_embed_id"]))
+            if item.get("next_embed_id") is not None:
+                neighbor_ids.append(int(item["next_embed_id"]))
+        neighbor_text = _fetch_neighbor_texts(conn, table=embeddings_table, neighbor_ids=neighbor_ids)
+
+        for item in ordered:
+            prev_id = item.pop("prev_embed_id", None)
+            next_id = item.pop("next_embed_id", None)
+            item["prev_text"] = neighbor_text.get(prev_id) if prev_id is not None else None
+            item["next_text"] = neighbor_text.get(next_id) if next_id is not None else None
+
+        return ordered
 
 
 def _search_embeddings(
@@ -367,12 +535,21 @@ def create_app() -> Flask:
         jina_embedding_task=os.environ.get("JINA_EMBED_TASK", "text-matching"),
         default_top_k=int(os.environ.get("DEFAULT_TOP_K", "10")),
         static_dir=_env_optional_path("STATIC_DIR", root=root),
+        hnsw_enabled=_env_bool("HNSW_ENABLED", True),
+        hnsw_m=int(os.environ.get("HNSW_M", "16")),
+        hnsw_ef_construction=int(os.environ.get("HNSW_EF_CONSTRUCTION", "200")),
+        hnsw_ef_search=int(os.environ.get("HNSW_EF_SEARCH", "64")),
     )
 
     # Disable Flask's built-in static route (/static/...) so our explicit
     # `/static/<path:filename>` handler can serve from `STATIC_DIR`.
     app = Flask(__name__, static_folder=None)
     app.config["APP_CONFIG"] = config
+    app.config["HNSW_STATE"] = {
+        "lock": threading.Lock(),
+        "index": None,
+        "file_sig": None,
+    }
 
     @app.get("/health")
     def health() -> Response:
@@ -387,6 +564,7 @@ def create_app() -> Flask:
                 "jina_embedding_model": cfg.jina_embedding_model,
                 "jina_embedding_task": cfg.jina_embedding_task,
                 "has_jina_api_key": bool(cfg.jina_api_key),
+                "hnsw_enabled": cfg.hnsw_enabled,
             }
         )
 
@@ -440,13 +618,38 @@ def create_app() -> Flask:
                 task=cfg.jina_embedding_task,
                 text=query_text,
             )
-            results = _search_embeddings(
-                embedding_db_path=cfg.embedding_db_path,
-                embeddings_table=cfg.embeddings_table,
-                query_vec=query_vec,
-                top_k=top_k_int,
-                include_context=include_context_bool,
-            )
+            if cfg.hnsw_enabled:
+                state = app.config["HNSW_STATE"]
+                file_sig = _file_signature(cfg.embedding_db_path)
+                index = state["index"]
+                if index is None or state["file_sig"] != file_sig:
+                    with state["lock"]:
+                        if state["index"] is None or state["file_sig"] != file_sig:
+                            index, file_sig = _build_hnsw_index(
+                                embedding_db_path=cfg.embedding_db_path,
+                                embeddings_table=cfg.embeddings_table,
+                                m=cfg.hnsw_m,
+                                ef_construction=cfg.hnsw_ef_construction,
+                                ef_search=cfg.hnsw_ef_search,
+                            )
+                            state["index"] = index
+                            state["file_sig"] = file_sig
+                results = _search_embeddings_ann(
+                    embedding_db_path=cfg.embedding_db_path,
+                    embeddings_table=cfg.embeddings_table,
+                    query_vec=query_vec,
+                    top_k=top_k_int,
+                    include_context=include_context_bool,
+                    index=state["index"],
+                )
+            else:
+                results = _search_embeddings(
+                    embedding_db_path=cfg.embedding_db_path,
+                    embeddings_table=cfg.embeddings_table,
+                    query_vec=query_vec,
+                    top_k=top_k_int,
+                    include_context=include_context_bool,
+                )
         except Exception as e:
             return jsonify({"ok": False, "error": str(e)}), 500
 
