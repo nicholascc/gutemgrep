@@ -317,7 +317,15 @@ def _anthropic_single_turn(
     model: str,
     prompt: str,
     max_tokens: int,
+    system: Optional[str] = None,
 ) -> str:
+    payload: Dict[str, Any] = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    if system:
+        payload["system"] = system
     resp = requests.post(
         "https://api.anthropic.com/v1/messages",
         headers={
@@ -325,11 +333,7 @@ def _anthropic_single_turn(
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
         },
-        json={
-            "model": model,
-            "max_tokens": max_tokens,
-            "messages": [{"role": "user", "content": prompt}],
-        },
+        json=payload,
         timeout=60,
     )
     if resp.status_code >= 400:
@@ -1146,6 +1150,42 @@ def create_app() -> Flask:
             return jsonify({"ok": False, "error": str(exc)}), 500
 
         return jsonify({"text": text})
+
+    @app.post("/mutate")
+    def mutate() -> Response:
+        cfg: AppConfig = app.config["APP_CONFIG"]
+        body = request.get_json(silent=True) or {}
+        text = body.get("text", "")
+        instruction = body.get("instruction", "")
+        if not isinstance(text, str) or not text.strip():
+            return jsonify({"ok": False, "error": "Missing non-empty 'text'"}), 400
+        if not isinstance(instruction, str) or not instruction.strip():
+            return jsonify({"ok": False, "error": "Missing non-empty 'instruction'"}), 400
+
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            return jsonify({"ok": False, "error": "ANTHROPIC_API_KEY not set"}), 500
+
+        system = (
+            "You are a passage rewriter. The user gives you a passage and an instruction "
+            "describing how to alter it. Rewrite the passage according to the instruction, "
+            "preserving the original style, tone, and approximate length. "
+            "Return ONLY the rewritten passage with no preamble, explanation, or commentary."
+        )
+        prompt = f"Passage:\n{text.strip()}\n\nInstruction:\n{instruction.strip()}"
+
+        try:
+            mutated = _anthropic_single_turn(
+                api_key=api_key,
+                model="claude-haiku-4-5",
+                prompt=prompt,
+                max_tokens=1024,
+                system=system,
+            )
+        except Exception as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 500
+
+        return jsonify({"mutated_text": mutated})
 
     @app.get("/book/by-embed/<int:embed_id>")
     def book_by_embed(embed_id: int) -> Response:

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import { postQuery, getSavedQuery, getBookByEmbed, createVector, listVectors, queryByVector } from "./api.js";
+import { postQuery, getSavedQuery, getBookByEmbed, createVector, listVectors, queryByVector, mutateText } from "./api.js";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -559,9 +559,134 @@ function CollectButton({ collected, onCollect, size = "normal" }) {
   );
 }
 
+// ─── Alter Button (inline) ───────────────────────────────────────────────────
+
+function AlterButton({ text, onAltered, size = "normal" }) {
+  const [expanded, setExpanded] = useState(false);
+  const [instruction, setInstruction] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [hovered, setHovered] = useState(false);
+  const inputRef = useRef(null);
+  const fontSize = size === "small" ? 12 : 13;
+
+  useEffect(() => {
+    if (expanded && inputRef.current) inputRef.current.focus();
+  }, [expanded]);
+
+  const handleSubmit = async () => {
+    if (!instruction.trim() || loading) return;
+    setLoading(true);
+    try {
+      const resp = await mutateText({ text, instruction: instruction.trim() });
+      if (resp.mutated_text) {
+        onAltered(resp.mutated_text);
+        setInstruction("");
+        setExpanded(false);
+      }
+    } catch {
+      // silently fail for now
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (expanded) {
+    return (
+      <div onClick={(e) => e.stopPropagation()} style={{ display: "flex", gap: 6, alignItems: "center" }}>
+        <input
+          ref={inputRef}
+          type="text"
+          value={instruction}
+          onChange={(e) => setInstruction(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") handleSubmit();
+            if (e.key === "Escape") { setExpanded(false); setInstruction(""); }
+          }}
+          placeholder={"how to alter\u2026"}
+          disabled={loading}
+          style={{
+            background: "rgba(18, 16, 24, 0.6)",
+            border: `1px solid ${WARM(0.15)}`, borderRadius: 3,
+            padding: "4px 8px", fontFamily: FONT, fontStyle: "italic",
+            fontSize: fontSize - 1, color: PARCHMENT(0.8), outline: "none",
+            width: 150,
+          }}
+        />
+        {loading ? (
+          <span style={{ fontFamily: FONT, fontStyle: "italic", fontSize: fontSize - 1, color: WARM(0.4), animation: "pulseGlow 1.5s ease infinite", whiteSpace: "nowrap" }}>
+            {"\u2026"}
+          </span>
+        ) : (
+          <button
+            onClick={handleSubmit}
+            style={{
+              background: "none", border: "none", fontFamily: FONT,
+              fontStyle: "italic", fontSize: fontSize - 1, padding: "2px 0",
+              color: WARM(instruction.trim() ? 0.6 : 0.25),
+              cursor: instruction.trim() ? "pointer" : "default",
+              whiteSpace: "nowrap",
+            }}
+          >
+            go
+          </button>
+        )}
+        <button
+          onClick={() => { setExpanded(false); setInstruction(""); }}
+          style={{
+            background: "none", border: "none", fontFamily: FONT,
+            fontSize: fontSize - 1, padding: "2px 0",
+            color: WARM(0.3), cursor: "pointer", whiteSpace: "nowrap",
+          }}
+        >
+          {"\u00d7"}
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <button
+      onClick={(e) => { e.stopPropagation(); setExpanded(true); }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        background: "none", border: "none", fontFamily: FONT,
+        fontStyle: "italic", fontSize, padding: "2px 0",
+        color: WARM(hovered ? 0.8 : 0.4),
+        cursor: "pointer",
+        transition: "color 0.3s ease", whiteSpace: "nowrap",
+      }}
+    >
+      + alter
+    </button>
+  );
+}
+
+// ─── Sidebar Search Button ──────────────────────────────────────────────────
+
+function SidebarSearchButton({ onClick }) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <button
+      onClick={(e) => { e.stopPropagation(); onClick(); }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        background: "none", border: "none", fontFamily: FONT,
+        fontStyle: "italic", fontSize: 12, padding: "2px 0",
+        color: WARM(hovered ? 0.8 : 0.4),
+        cursor: "pointer",
+        transition: "color 0.3s ease", whiteSpace: "nowrap",
+      }}
+    >
+      search
+    </button>
+  );
+}
+
 // ─── Collection Sidebar (LEFT) ──────────────────────────────────────────────
 
-function CollectionSidebar({ items, open, onClose, onRemove, selected, onToggleSelect, onCreateVector, customTexts, selectedCustomIndices, onToggleCustomSelect, onAddCustomText, onRemoveCustomText }) {
+function CollectionSidebar({ items, open, onClose, onRemove, selected, onToggleSelect, onCreateVector, customTexts, selectedCustomIndices, onToggleCustomSelect, onAddCustomText, onRemoveCustomText, onAlter, onSearchByText }) {
   const [newText, setNewText] = useState("");
   const [vectorName, setVectorName] = useState("");
   const [showNaming, setShowNaming] = useState(false);
@@ -625,7 +750,12 @@ function CollectionSidebar({ items, open, onClose, onRemove, selected, onToggleS
                     <p style={{ fontFamily: FONT, fontSize: 13.5, lineHeight: 1.6, color: DIM(isSelected ? 0.85 : 0.65), margin: "0 0 4px 0", transition: "color 0.2s ease" }}>
                       {renderFormatted(item.paragraph_text.length > 100 ? item.paragraph_text.slice(0, 100) + "\u2026" : item.paragraph_text)}
                     </p>
-                    <span style={{ fontFamily: FONT, fontStyle: "italic", fontSize: 11.5, color: WARM(0.3) }}>{renderFormatted(item.book_title)}</span>
+                    <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                      <span style={{ fontFamily: FONT, fontStyle: "italic", fontSize: 11.5, color: WARM(0.3) }}>{renderFormatted(item.book_title)}</span>
+                      <span style={{ color: WARM(0.1) }}>{"\u00b7"}</span>
+                      <AlterButton text={item.paragraph_text} onAltered={onAlter} size="small" />
+                      <SidebarSearchButton onClick={() => onSearchByText(item.paragraph_text)} />
+                    </div>
                   </div>
                   <button
                     onClick={() => onRemove(item.embed_id)}
@@ -661,10 +791,15 @@ function CollectionSidebar({ items, open, onClose, onRemove, selected, onToggleS
                     <p style={{ fontFamily: FONT, fontSize: 13.5, lineHeight: 1.6, color: DIM(isSelected ? 0.85 : 0.65), margin: 0, fontStyle: "italic", transition: "color 0.2s ease" }}>
                       {text.length > 100 ? text.slice(0, 100) + "\u2026" : text}
                     </p>
-                    <span style={{ fontFamily: FONT, fontSize: 11.5, color: WARM(0.3), fontStyle: "italic" }}>
-                      <span style={{ fontFamily: FONT, fontSize: 10, color: WARM(0.35), marginRight: 4, fontStyle: "normal" }}>T</span>
-                      custom text
-                    </span>
+                    <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                      <span style={{ fontFamily: FONT, fontSize: 11.5, color: WARM(0.3), fontStyle: "italic" }}>
+                        <span style={{ fontFamily: FONT, fontSize: 10, color: WARM(0.35), marginRight: 4, fontStyle: "normal" }}>T</span>
+                        custom text
+                      </span>
+                      <span style={{ color: WARM(0.1) }}>{"\u00b7"}</span>
+                      <AlterButton text={text} onAltered={onAlter} size="small" />
+                      <SidebarSearchButton onClick={() => onSearchByText(text)} />
+                    </div>
                   </div>
                   <button
                     onClick={() => onRemoveCustomText(i)}
@@ -943,7 +1078,7 @@ function VectorsTab({ count, onClick }) {
 
 // ─── Result Card ─────────────────────────────────────────────────────────────
 
-function ResultCard({ result, index, onTextSelect, onExpand, onCollect, collected }) {
+function ResultCard({ result, index, onTextSelect, onExpand, onCollect, collected, onAlter }) {
   const [visible, setVisible] = useState(false);
   const cardBodyRef = useRef(null);
 
@@ -1020,9 +1155,10 @@ function ResultCard({ result, index, onTextSelect, onExpand, onCollect, collecte
         )}
       </div>
 
-      {/* Bottom: collect */}
+      {/* Bottom: collect + alter */}
       <div style={{ display: "flex", gap: 20, marginTop: 10, paddingLeft: 2 }}>
         <CollectButton collected={collected} onCollect={() => onCollect(result)} />
+        <AlterButton text={result.paragraph_text} onAltered={(mutated) => onAlter(mutated)} />
       </div>
     </div>
   );
@@ -1337,6 +1473,8 @@ export default function GutemGrep() {
         onToggleCustomSelect={handleToggleCustomSelect}
         onAddCustomText={handleAddCustomText}
         onRemoveCustomText={handleRemoveCustomText}
+        onAlter={handleAddCustomText}
+        onSearchByText={(text) => { setCollectionOpen(false); doSearch(text); }}
       />
       {!collectionOpen && <CollectionTab count={collection.length} onClick={() => setCollectionOpen(true)} />}
 
@@ -1456,6 +1594,7 @@ export default function GutemGrep() {
                     onExpand={(r, rect) => doExpand(r, rect)}
                     onCollect={handleCollect}
                     collected={collectedIds.has(result.embed_id)}
+                    onAlter={handleAddCustomText}
                   />
                 ))}
               </div>
