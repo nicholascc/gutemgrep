@@ -14,6 +14,82 @@ const WARM = (a) => `rgba(200, 185, 160, ${a})`;
 const PARCHMENT = (a) => `rgba(225, 215, 195, ${a})`;
 const DIM = (a) => `rgba(210, 198, 175, ${a})`;
 
+// ─── Text Formatting (copy-safe) ─────────────────────────────────────────────
+// Renders _underscores_ as italics and -- as em-dashes visually,
+// but clipboard copies preserve the original _underscores_ and -- characters.
+// Technique: original chars live in font-size:0 spans (invisible, but selected
+// on copy); visual replacements use user-select:none (visible, skipped on copy).
+
+const COPY_ONLY = { fontSize: 0, lineHeight: 0, overflow: "hidden" };
+const DISPLAY_ONLY = { userSelect: "none", WebkitUserSelect: "none" };
+
+function isWordChar(ch) {
+  if (!ch) return false;
+  const code = ch.charCodeAt(0);
+  return (code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+}
+
+function renderFormatted(text) {
+  if (text == null) return null;
+  const s = String(text);
+  const parts = [];
+  let last = 0;
+  let i = 0;
+  let k = 0;
+
+  while (i < s.length) {
+    // Check for -- (em-dash)
+    if (s[i] === "-" && s[i + 1] === "-") {
+      if (i > last) parts.push(s.slice(last, i));
+      parts.push(
+        <span key={`d${k++}`}>
+          <span style={COPY_ONLY}>--</span>
+          <span style={DISPLAY_ONLY}>{"\u2014"}</span>
+        </span>
+      );
+      last = i + 2;
+      i += 2;
+      continue;
+    }
+
+    // Check for _italic_
+    if (s[i] === "_") {
+      const prev = i > 0 ? s[i - 1] : "";
+      if (!isWordChar(prev)) {
+        let j = i + 1;
+        while (j < s.length) {
+          if (s[j] === "_") {
+            const next = j + 1 < s.length ? s[j + 1] : "";
+            if (!isWordChar(next)) break;
+          }
+          j++;
+        }
+        if (j < s.length && s[j] === "_" && j > i + 1) {
+          const content = s.slice(i + 1, j);
+          if (content.trim().length > 0) {
+            if (i > last) parts.push(s.slice(last, i));
+            parts.push(
+              <em key={`i${k++}`}>
+                <span style={COPY_ONLY}>_</span>
+                {content}
+                <span style={COPY_ONLY}>_</span>
+              </em>
+            );
+            last = j + 1;
+            i = j + 1;
+            continue;
+          }
+        }
+      }
+    }
+
+    i++;
+  }
+
+  if (last < s.length) parts.push(s.slice(last));
+  return parts.length > 0 ? parts : s;
+}
+
 // ─── Token from URL ──────────────────────────────────────────────────────────
 
 function useInitialToken() {
@@ -187,11 +263,11 @@ function SimilarCard({ item, onClick }) {
         color: PARCHMENT(hovered ? 0.75 : 0.55), margin: "0 0 10px 0",
         transition: "color 0.25s ease",
       }}>
-        {item.paragraph_text.length > 150 ? item.paragraph_text.slice(0, 150) + "\u2026" : item.paragraph_text}
+        {renderFormatted(item.paragraph_text.length > 150 ? item.paragraph_text.slice(0, 150) + "\u2026" : item.paragraph_text)}
       </p>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
         <span style={{ fontFamily: FONT, fontStyle: "italic", fontSize: 12, color: WARM(0.45) }}>
-          {item.book_title}
+          {renderFormatted(item.book_title)}
         </span>
         <span style={{ fontFamily: FONT, fontSize: 11, color: WARM(0.25), fontVariantNumeric: "tabular-nums" }}>
           {item.score.toFixed(3)}
@@ -275,7 +351,7 @@ function BookReader({ result, allResults, onCollapse, onTextSelect, onNavigateTo
       }}>
         <div style={{ flex: 1, minWidth: 0 }}>
           <span style={{ fontFamily: FONT, fontStyle: "italic", fontSize: 20, color: WARM(0.8), letterSpacing: "0.02em" }}>
-            {result.book_title}
+            {renderFormatted(result.book_title)}
           </span>
           {result.book_id && (
             <span style={{ fontFamily: FONT, fontSize: 12, color: WARM(0.3), marginLeft: 12 }}>
@@ -371,7 +447,7 @@ const BookParagraphWithRef = ({ para, isHighlight, innerRef }) => {
         lineHeight: 1.82, color: hovered ? hoverColor : baseColor,
         margin: 0, letterSpacing: "0.01em", transition: "color 0.3s ease",
       }}>
-        {para.text}
+        {renderFormatted(para.text)}
       </p>
     </div>
   );
@@ -430,9 +506,9 @@ function CollectionSidebar({ items, open, onClose, onSearchAverage }) {
           {items.map((item, i) => (
             <div key={i} style={{ padding: "14px 0", borderBottom: `1px solid ${WARM(0.06)}` }}>
               <p style={{ fontFamily: FONT, fontSize: 14, lineHeight: 1.65, color: DIM(0.7), margin: "0 0 6px 0" }}>
-                {item.paragraph_text.slice(0, 120)}{"\u2026"}
+                {renderFormatted(item.paragraph_text.slice(0, 120) + "\u2026")}
               </p>
-              <span style={{ fontFamily: FONT, fontStyle: "italic", fontSize: 12, color: WARM(0.35) }}>{item.book_title}</span>
+              <span style={{ fontFamily: FONT, fontStyle: "italic", fontSize: 12, color: WARM(0.35) }}>{renderFormatted(item.book_title)}</span>
             </div>
           ))}
           <button
@@ -498,7 +574,7 @@ function ResultCard({ result, index, onTextSelect, onExpand, onCollect }) {
       {/* Book title + score */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 10, padding: "0 2px" }}>
         <span style={{ fontFamily: FONT, fontStyle: "italic", fontSize: 14, color: WARM(0.7), letterSpacing: "0.02em" }}>
-          {result.book_title}
+          {renderFormatted(result.book_title)}
           {result.book_id != null && <span style={{ color: WARM(0.35), marginLeft: 8, fontSize: 12, fontStyle: "normal" }}>#{result.book_id}</span>}
         </span>
         <span style={{ fontFamily: FONT, fontSize: 12, color: WARM(0.35), fontVariantNumeric: "tabular-nums" }}>
@@ -517,17 +593,17 @@ function ResultCard({ result, index, onTextSelect, onExpand, onCollect }) {
 
         {result.prev_text && (
           <p style={{ fontFamily: FONT, fontSize: 16, lineHeight: 1.75, color: DIM(0.25), margin: "0 0 20px 0", borderBottom: `1px solid ${WARM(0.06)}`, paddingBottom: 18 }}>
-            {result.prev_text}
+            {renderFormatted(result.prev_text)}
           </p>
         )}
 
         <p style={{ fontFamily: FONT, fontSize: 18.5, lineHeight: 1.8, color: PARCHMENT(0.92), margin: 0, letterSpacing: "0.01em", paddingRight: 40 }}>
-          {result.paragraph_text}
+          {renderFormatted(result.paragraph_text)}
         </p>
 
         {result.next_text && (
           <p style={{ fontFamily: FONT, fontSize: 16, lineHeight: 1.75, color: DIM(0.25), margin: "20px 0 0 0", borderTop: `1px solid ${WARM(0.06)}`, paddingTop: 18 }}>
-            {result.next_text}
+            {renderFormatted(result.next_text)}
           </p>
         )}
       </div>
@@ -590,7 +666,7 @@ function FloatingCard({ result, rect, target, phase, highlightPos }) {
         fontFamily: FONT, fontSize: 18.5, lineHeight: 1.8,
         color: PARCHMENT(0.92), margin: 0, letterSpacing: "0.01em",
       }}>
-        {result.paragraph_text}
+        {renderFormatted(result.paragraph_text)}
       </p>
     </div>
   );
