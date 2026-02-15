@@ -15,6 +15,7 @@ import os
 import subprocess
 import pickle
 import concurrent.futures as cf
+import time
 
 if __name__ == '__main__':
 
@@ -83,6 +84,33 @@ if __name__ == '__main__':
         default="0,1,2,3,4,5,6,7,8,9",
         type=str)
 
+    parser.add_argument(
+        "--prefix_depth",
+        help="Generate prefixes of depth N (e.g. 2 -> 00..99). Overrides --prefixes when >1.",
+        default=1,
+        type=int)
+
+    parser.add_argument(
+        "--probe_prefixes",
+        help="Probe mirror to discover directory prefixes for --prefix_depth > 1.",
+        action="store_true")
+
+    parser.add_argument(
+        "--loop",
+        help="Repeat rsync + populate_raw in a loop (useful for periodic saves).",
+        action="store_true")
+
+    parser.add_argument(
+        "--sleep_seconds",
+        help="Sleep time between loop iterations (default: 60).",
+        default=60,
+        type=int)
+
+    parser.add_argument(
+        "--update_metadata_each_pass",
+        help="Update metadata/bookshelves on every loop pass (default: only after loop ends).",
+        action="store_true")
+
     # quiet argument, to supress info
     parser.add_argument(
         "-q", "--quiet",
@@ -121,7 +149,7 @@ if __name__ == '__main__':
     #---------------------------------------------
     #        [.-][t0][x.]t[x.]    *         [t8]
     def _rsync_prefix(prefix):
-        src = "%s/%s" % (args.mirror_url, prefix) if prefix is not None else args.mirror_url
+        src = "%s/%s" % (args.mirror_url.rstrip("/"), prefix) if prefix is not None else args.mirror_url
         sp_args = ["rsync", "-am%s" % vstring,
                    "--include", "*/",
                    "--include", "[p123456789][g0123456789]%s[.-][t0][x.]t[x.]*[t8]" % args.pattern,
@@ -130,7 +158,42 @@ if __name__ == '__main__':
                    ]
         return subprocess.call(sp_args)
 
-    prefixes = [p.strip() for p in args.prefixes.split(",") if p.strip() != ""]
+    def _list_subdirs(prefix):
+        src = "%s/%s/" % (args.mirror_url.rstrip("/"), prefix) if prefix else "%s/" % args.mirror_url.rstrip("/")
+        try:
+            res = subprocess.check_output(["rsync", "--list-only", src], stderr=subprocess.DEVNULL)
+            lines = res.decode("utf-8", errors="ignore").splitlines()
+            subdirs = []
+            for line in lines:
+                if not line:
+                    continue
+                if line[0] == "d":
+                    name = line.split()[-1]
+                    if name not in (".", ".."):
+                        subdirs.append(name)
+            return subdirs
+        except Exception:
+            return []
+
+    if args.prefix_depth > 1:
+        digits = ["%d" % i for i in range(10)]
+        if args.probe_prefixes:
+            prefixes = _list_subdirs("")
+            if not prefixes:
+                prefixes = digits
+            for _ in range(args.prefix_depth - 1):
+                next_prefixes = []
+                for p in prefixes:
+                    subdirs = _list_subdirs(p)
+                    if subdirs:
+                        next_prefixes.extend(["%s/%s" % (p, s) for s in subdirs])
+                prefixes = next_prefixes or prefixes
+        else:
+            prefixes = digits
+            for _ in range(args.prefix_depth - 1):
+                prefixes = ["%s/%s" % (a, b) for a in prefixes for b in digits]
+    else:
+        prefixes = [p.strip() for p in args.prefixes.split(",") if p.strip() != ""]
     if args.workers <= 1 or len(prefixes) <= 1:
         for p in prefixes:
             _rsync_prefix(p)
@@ -138,40 +201,50 @@ if __name__ == '__main__':
         with cf.ThreadPoolExecutor(max_workers=args.workers) as ex:
             list(ex.map(_rsync_prefix, prefixes))
 
-    # Get rid of duplicates
-    # ---------------------
-    # A very small portion of books are stored more than
-    # once in PG's site. We keep the newest one, see
-    # erase_duplicates_in_mirror docstring.
-    dups_list = list_duplicates_in_mirror(mirror_dir=args.mirror)
+    def _run_rsync():
+        if args.workers <= 1 or len(prefixes) <= 1:
+            for p in prefixes:
+                _rsync_prefix(p)
+        else:
+            with cf.ThreadPoolExecutor(max_workers=args.workers) as ex:
+                list(ex.map(_rsync_prefix, prefixes))
 
-    # Populate raw from mirror
-    # ------------------------
-    # We populate 'raw_dir' hardlinking to
-    # the hidden 'mirror_dir'. Names are standarized
-    # into PG12345_raw.txt form.
-    populate_raw_from_mirror(
-        mirror_dir=args.mirror,
-        raw_dir=args.raw,
-        overwrite=args.overwrite_raw,
-        dups_list=dups_list,
-        quiet=args.quiet
-        )
+    def _populate_raw():
+        dups_list = list_duplicates_in_mirror(mirror_dir=args.mirror)
+        populate_raw_from_mirror(
+            mirror_dir=args.mirror,
+            raw_dir=args.raw,
+            overwrite=args.overwrite_raw,
+            dups_list=dups_list,
+            quiet=args.quiet
+            )
 
-    # Update metadata
-    # ---------------
-    # By default, update the whole metadata csv
-    # file each time new data is downloaded.
-    make_df_metadata(
-        path_xml=os.path.join(args.metadata, 'rdf-files.tar.bz2'),
-        path_out=os.path.join(args.metadata, 'metadata.csv'),
-        update=args.keep_rdf
-        )
+    def _update_metadata_and_bookshelves():
+        make_df_metadata(
+            path_xml=os.path.join(args.metadata, 'rdf-files.tar.bz2'),
+            path_out=os.path.join(args.metadata, 'metadata.csv'),
+            update=args.keep_rdf
+            )
+        BS_dict, BS_num_to_category_str_dict = parse_bookshelves()
+        with open("metadata/bookshelves_ebooks_dict.pkl", 'wb') as fp:
+            pickle.dump(BS_dict, fp)
+        with open("metadata/bookshelves_categories_dict.pkl", 'wb') as fp:
+            pickle.dump(BS_num_to_category_str_dict, fp)
 
-    # Bookshelves
-    # -----------
-    # Get bookshelves and their respective books and titles as dicts
-    BS_dict, BS_num_to_category_str_dict = parse_bookshelves()
+    try:
+        while True:
+            _run_rsync()
+            _populate_raw()
+            if args.update_metadata_each_pass:
+                _update_metadata_and_bookshelves()
+            if not args.loop:
+                break
+            time.sleep(args.sleep_seconds)
+    except KeyboardInterrupt:
+        pass
+
+    if not args.update_metadata_each_pass:
+        _update_metadata_and_bookshelves()
     with open("metadata/bookshelves_ebooks_dict.pkl", 'wb') as fp:
         pickle.dump(BS_dict, fp)
     with open("metadata/bookshelves_categories_dict.pkl", 'wb') as fp:
