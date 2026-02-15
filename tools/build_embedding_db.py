@@ -281,7 +281,14 @@ def _load_metadata(
     return by_book_id, authors_by_id, downloads_by_id, notable_book_ids
 
 
-def _embed_batch(*, api_key: str, model: str, task: str, texts: list[str]) -> tuple[list[np.ndarray], int]:
+def _embed_batch(
+    *,
+    api_key: str,
+    model: str,
+    task: str,
+    texts: list[str],
+    request_timeout_s: float,
+) -> tuple[list[np.ndarray], int]:
     if any((not isinstance(t, str)) or (not t.strip()) for t in texts):
         raise ValueError("Embedding batch contains empty text.")
 
@@ -289,7 +296,7 @@ def _embed_batch(*, api_key: str, model: str, task: str, texts: list[str]) -> tu
         "https://api.jina.ai/v1/embeddings",
         headers={"Authorization": f"Bearer {api_key}"},
         json={"model": model, "task": task, "input": texts, "truncate": True},
-        timeout=60,
+        timeout=request_timeout_s,
     )
     if resp.status_code >= 400:
         raise RuntimeError(f"Jina embeddings error ({resp.status_code}): {resp.text}")
@@ -323,21 +330,53 @@ def _retry_embed_batch(
     model: str,
     task: str,
     texts: list[str],
+    request_timeout_s: float,
     max_retries: int = 6,
 ) -> tuple[list[np.ndarray], int]:
+    def is_retriable(err: Exception) -> bool:
+        if isinstance(err, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)):
+            return True
+        msg = str(err)
+        return any(code in msg for code in ["(429)", "(500)", "(502)", "(503)", "(504)"])
+
     delay_s = 1.0
     last_err: Exception | None = None
     for attempt in range(max_retries + 1):
         try:
-            return _embed_batch(api_key=api_key, model=model, task=task, texts=texts)
+            return _embed_batch(
+                api_key=api_key,
+                model=model,
+                task=task,
+                texts=texts,
+                request_timeout_s=request_timeout_s,
+            )
         except Exception as e:
             last_err = e
-            msg = str(e)
-            retriable = any(code in msg for code in ["(429)", "(500)", "(502)", "(503)", "(504)"])
+            retriable = is_retriable(e)
             if attempt >= max_retries or not retriable:
-                raise
+                break
             time.sleep(delay_s)
             delay_s = min(20.0, delay_s * 2.0)
+    # If a large batch keeps timing out, split and retry recursively.
+    if isinstance(last_err, requests.exceptions.Timeout) and len(texts) > 1:
+        mid = len(texts) // 2
+        left_vecs, left_tokens = _retry_embed_batch(
+            api_key=api_key,
+            model=model,
+            task=task,
+            texts=texts[:mid],
+            request_timeout_s=request_timeout_s,
+            max_retries=max_retries,
+        )
+        right_vecs, right_tokens = _retry_embed_batch(
+            api_key=api_key,
+            model=model,
+            task=task,
+            texts=texts[mid:],
+            request_timeout_s=request_timeout_s,
+            max_retries=max_retries,
+        )
+        return left_vecs + right_vecs, int(left_tokens) + int(right_tokens)
     assert last_err is not None
     raise last_err
 
@@ -387,15 +426,39 @@ def _embed_and_insert(
     model: str,
     task: str,
     rows: list[ParagraphRow],
+    request_timeout_s: float,
+    max_retries: int,
 ) -> None:
-    res = _embed_payload(api_key=api_key, model=model, task=task, rows=rows)
+    res = _embed_payload(
+        api_key=api_key,
+        model=model,
+        task=task,
+        rows=rows,
+        request_timeout_s=request_timeout_s,
+        max_retries=max_retries,
+    )
     _insert_payload(conn, table=table, payload=res.payload)
 
 
-def _embed_payload(*, api_key: str, model: str, task: str, rows: list[ParagraphRow]) -> EmbedResult:
+def _embed_payload(
+    *,
+    api_key: str,
+    model: str,
+    task: str,
+    rows: list[ParagraphRow],
+    request_timeout_s: float,
+    max_retries: int,
+) -> EmbedResult:
     texts = [r.paragraph_text for r in rows]
     t0 = time.monotonic()
-    vecs, total_tokens = _retry_embed_batch(api_key=api_key, model=model, task=task, texts=texts)
+    vecs, total_tokens = _retry_embed_batch(
+        api_key=api_key,
+        model=model,
+        task=task,
+        texts=texts,
+        request_timeout_s=request_timeout_s,
+        max_retries=max_retries,
+    )
     embed_s = time.monotonic() - t0
 
     payload = []
@@ -441,6 +504,18 @@ def main() -> None:
     parser.add_argument("--model", default=os.environ.get("JINA_EMBED_MODEL", "jina-embeddings-v3"))
     parser.add_argument("--task", default=os.environ.get("JINA_EMBED_TASK", "text-matching"))
     parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument(
+        "--request-timeout",
+        type=float,
+        default=float(os.environ.get("EMBED_REQUEST_TIMEOUT", "180")),
+        help="HTTP timeout in seconds for each embeddings request.",
+    )
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=int(os.environ.get("EMBED_MAX_RETRIES", "6")),
+        help="Max retries for retriable embeddings errors.",
+    )
     parser.add_argument(
         "--concurrency",
         type=int,
@@ -516,6 +591,8 @@ def main() -> None:
         max_paragraphs = max(0, int(args.max_paragraphs))
         checkpoint_frequency = max(0, int(args.checkpoint_frequency))
         task = str(args.task or "text-matching")
+        request_timeout_s = max(1.0, float(args.request_timeout))
+        max_retries = max(0, int(args.max_retries))
 
         max_books = max(0, int(args.max_books))
         text_files = list(_iter_text_files(text_dir))
@@ -665,9 +742,28 @@ def main() -> None:
             if not rows:
                 return
             if pool is None:
-                insert_one_payload(_embed_payload(api_key=api_key, model=args.model, task=task, rows=rows))
+                insert_one_payload(
+                    _embed_payload(
+                        api_key=api_key,
+                        model=args.model,
+                        task=task,
+                        rows=rows,
+                        request_timeout_s=request_timeout_s,
+                        max_retries=max_retries,
+                    )
+                )
                 return
-            inflight.add(pool.submit(_embed_payload, api_key=api_key, model=args.model, task=task, rows=rows))
+            inflight.add(
+                pool.submit(
+                    _embed_payload,
+                    api_key=api_key,
+                    model=args.model,
+                    task=task,
+                    rows=rows,
+                    request_timeout_s=request_timeout_s,
+                    max_retries=max_retries,
+                )
+            )
             if len(inflight) >= max_inflight:
                 drain_one(pool=pool)
 
