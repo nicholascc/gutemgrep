@@ -32,41 +32,14 @@
             transition: background-color 0.8s ease, color 0.8s ease;
         }
 
-        /* Background illustration container */
-        .background-illustration {
+        /* Stars layer - bottom layer */
+        .stars {
             position: fixed;
             top: 0;
             left: 0;
             width: 100%;
             height: 100%;
             z-index: 0;
-            opacity: 0.35;
-            transition: opacity 0.8s ease, filter 0.8s ease;
-            pointer-events: none;
-        }
-
-        /* Placeholder for background image - replace with actual illustration */
-        .background-illustration::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background-image: url('monastery.png');
-            background-size: 100% auto;
-            background-position: center bottom;
-            background-repeat: no-repeat;
-        }
-
-        /* Stars layer - hidden by default */
-        .stars {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 50vh; /* Only top half of screen */
-            z-index: 1;
             opacity: 0;
             transition: opacity 1s ease;
             pointer-events: none;
@@ -87,19 +60,58 @@
             50% { opacity: 1; }
         }
 
+        /* Star mask layer - uses monastery image to block stars over landscape */
+        .star-mask {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+            opacity: 0;
+            transition: opacity 0.8s ease;
+            pointer-events: none;
+            background-image: url('monastery_halftrans.png');
+            background-size: 100% auto;
+            background-position: center bottom;
+            background-repeat: no-repeat;
+            filter: brightness(0);
+        }
+
+        /* Background illustration layer - top layer */
+        .background-illustration {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 2;
+            opacity: 0.35;
+            transition: opacity 0.8s ease, filter 0.8s ease;
+            pointer-events: none;
+            background-image: url('monastery_halftrans.png');
+            background-size: 100% auto;
+            background-position: center bottom;
+            background-repeat: no-repeat;
+        }
+
         /* Night mode state */
         body.night-mode {
             background: #0a0f0d;
             color: var(--cream);
         }
 
-        body.night-mode .background-illustration {
-            opacity: 0.15;
-            filter: invert(1) hue-rotate(180deg);
-        }
-
         body.night-mode .stars {
             opacity: 1;
+        }
+
+        body.night-mode .star-mask {
+            opacity: 1;
+        }
+
+        body.night-mode .background-illustration {
+            filter: invert(1);
+            opacity: 0.6;
         }
 
         body.night-mode .logo {
@@ -125,7 +137,7 @@
         /* Main content */
         .hero-container {
             position: relative;
-            z-index: 2;
+            z-index: 10;
             min-height: 100vh;
             display: flex;
             flex-direction: column;
@@ -212,48 +224,46 @@
             cursor: pointer;
             transition: all 0.3s ease;
             border-radius: 50px;
-            font-weight: 700;
-            box-shadow: 0 6px 20px rgba(45, 74, 62, 0.25);
+            box-shadow: 0 4px 16px rgba(45, 74, 62, 0.2);
+            position: relative;
         }
 
         .search-button:hover {
-            background: #3d5a52;
-            border-color: rgba(61, 90, 82, 0.3);
-            transform: translateY(-3px);
-            box-shadow: 0 10px 30px rgba(45, 74, 62, 0.35);
+            background: var(--moss);
+            transform: translateY(-2px);
+            box-shadow: 0 6px 24px rgba(45, 74, 62, 0.3);
         }
 
         .search-button:active {
-            transform: translateY(-1px);
+            transform: translateY(0);
         }
-
-
 
         /* Additional content section */
         .additional-content {
             position: relative;
-            z-index: 2;
-            min-height: 100vh;
+            z-index: 10;
             padding: 6rem 2rem;
-            max-width: 1200px;
+            max-width: 1000px;
             margin: 0 auto;
             opacity: 0;
-            transition: opacity 0.6s ease;
+            transform: translateY(30px);
+            transition: opacity 0.8s ease, transform 0.8s ease;
         }
 
         .additional-content.visible {
             opacity: 1;
+            transform: translateY(0);
         }
 
         .content-section {
-            margin-bottom: 5rem;
+            margin-bottom: 4rem;
         }
 
         .section-title {
             font-size: 2rem;
-            margin-bottom: 2rem;
+            font-weight: 600;
+            margin-bottom: 1.5rem;
             color: var(--forest);
-            font-weight: 500;
             transition: color 0.8s ease;
         }
 
@@ -264,25 +274,30 @@
         .section-content {
             font-size: 1.25rem;
             line-height: 1.8;
-            max-width: 800px;
+            color: var(--ink);
+            transition: color 0.8s ease;
+        }
+
+        body.night-mode .section-content {
+            color: var(--cream);
         }
 
         .section-content p {
-            margin-bottom: 1.5rem;
+            margin-bottom: 1rem;
         }
 
         /* Examples grid */
         .examples-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-            gap: 2rem;
+            gap: 1.5rem;
             margin-top: 2rem;
         }
 
         .example-card {
-            padding: 2rem;
+            padding: 1.5rem;
+            background: rgba(250, 248, 243, 0.8);
             border: 2px solid var(--ink);
-            background: rgba(250, 248, 243, 0.9);
             cursor: pointer;
             transition: all 0.3s ease;
         }
@@ -376,11 +391,14 @@
     </style>
 </head>
 <body>
-    <!-- Background illustration layer -->
-    <div class="background-illustration"></div>
-
-    <!-- Stars layer -->
+    <!-- Stars layer (bottom) -->
     <div class="stars"></div>
+    
+    <!-- Star mask layer (middle) - blocks stars over landscape -->
+    <div class="star-mask"></div>
+    
+    <!-- Background illustration layer (top) -->
+    <div class="background-illustration"></div>
 
     <!-- Hero section -->
     <div class="hero-container">
@@ -453,22 +471,97 @@
         function generateStars() {
             if (starsGenerated) return;
             
-            const starCount = 100;
-            for (let i = 0; i < starCount; i++) {
+            // Create constellations
+            const constellations = [
+                // Constellation 1 - Big Dipper shape
+                {x: 15, y: 20, stars: [
+                    {dx: 0, dy: 0, size: 3.5},
+                    {dx: 3, dy: -1, size: 3},
+                    {dx: 6, dy: -1, size: 3.5},
+                    {dx: 9, dy: 0, size: 3},
+                    {dx: 11, dy: 3, size: 3.5},
+                    {dx: 13, dy: 6, size: 3},
+                    {dx: 14, dy: 9, size: 3.5}
+                ]},
+                // Constellation 2 - Orion's belt
+                {x: 70, y: 30, stars: [
+                    {dx: 0, dy: 0, size: 4},
+                    {dx: 3, dy: 0.5, size: 3.5},
+                    {dx: 6, dy: 1, size: 4},
+                    {dx: 1, dy: -4, size: 3},
+                    {dx: 5, dy: -3.5, size: 3},
+                    {dx: 1, dy: 5, size: 3},
+                    {dx: 5, dy: 4.5, size: 3}
+                ]},
+                // Constellation 3 - Little dipper
+                {x: 40, y: 15, stars: [
+                    {dx: 0, dy: 0, size: 3},
+                    {dx: 2, dy: 2, size: 2.5},
+                    {dx: 3, dy: 5, size: 2.5},
+                    {dx: 5, dy: 7, size: 3.5},
+                    {dx: 8, dy: 8, size: 3},
+                    {dx: 10, dy: 7, size: 2.5}
+                ]},
+                // Constellation 4 - Cassiopeia W shape
+                {x: 80, y: 60, stars: [
+                    {dx: 0, dy: 0, size: 3},
+                    {dx: 2, dy: -2, size: 3.5},
+                    {dx: 4, dy: 0, size: 3},
+                    {dx: 6, dy: -2, size: 3.5},
+                    {dx: 8, dy: 0, size: 3}
+                ]},
+                // Constellation 5 - Triangle
+                {x: 25, y: 50, stars: [
+                    {dx: 0, dy: 0, size: 3.5},
+                    {dx: 5, dy: 1, size: 3.5},
+                    {dx: 2.5, dy: -4, size: 4}
+                ]},
+                // Constellation 6 - Small cluster
+                {x: 55, y: 70, stars: [
+                    {dx: 0, dy: 0, size: 3},
+                    {dx: 1, dy: 2, size: 2.5},
+                    {dx: 2, dy: 0, size: 3},
+                    {dx: 3, dy: 2, size: 2.5},
+                    {dx: 1.5, dy: 4, size: 3.5}
+                ]}
+            ];
+            
+            // Add constellation stars
+            constellations.forEach(constellation => {
+                constellation.stars.forEach(starData => {
+                    const star = document.createElement('div');
+                    star.className = 'star';
+                    star.style.left = (constellation.x + starData.dx) + '%';
+                    star.style.top = (constellation.y + starData.dy) + '%';
+                    star.style.animationDelay = Math.random() * 3 + 's';
+                    star.style.width = starData.size + 'px';
+                    star.style.height = starData.size + 'px';
+                    
+                    if (starData.size > 3.5) {
+                        star.style.boxShadow = '0 0 6px rgba(255, 255, 255, 0.9)';
+                    }
+                    
+                    starsContainer.appendChild(star);
+                });
+            });
+            
+            // Add random background stars (more numerous)
+            const randomStarCount = 150;
+            for (let i = 0; i < randomStarCount; i++) {
                 const star = document.createElement('div');
                 star.className = 'star';
                 star.style.left = Math.random() * 100 + '%';
                 star.style.top = Math.random() * 100 + '%';
                 star.style.animationDelay = Math.random() * 3 + 's';
                 
-                // Vary star sizes (2-5px, with occasional larger stars)
-                const size = Math.random() * 3 + 2;
+                // Vary star sizes (smaller for background stars)
+                const size = Math.random() * 2 + 1.5;
                 star.style.width = size + 'px';
                 star.style.height = size + 'px';
                 
-                // Add glow to larger stars
-                if (size > 3.5) {
-                    star.style.boxShadow = '0 0 4px rgba(255, 255, 255, 0.8)';
+                // Occasional brighter star
+                if (Math.random() > 0.95) {
+                    star.style.boxShadow = '0 0 3px rgba(255, 255, 255, 0.6)';
                 }
                 
                 starsContainer.appendChild(star);
