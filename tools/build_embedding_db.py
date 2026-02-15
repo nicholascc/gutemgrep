@@ -521,7 +521,7 @@ def main() -> None:
                 key=lambda item: item[1],
                 reverse=True,
             )
-            top_popular_ids = {bid for bid, _ in by_popularity[:2000]}
+            top_popular_ids = {bid for bid, _ in by_popularity[:1000]}
 
         def sort_key(item: tuple[int, Path]) -> tuple[int, int]:
             book_id = item[0]
