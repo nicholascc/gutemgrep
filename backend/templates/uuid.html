@@ -4,31 +4,41 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>gutemgrep — {{ token }}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;1,400;1,500&display=swap"
+      rel="stylesheet"
+    />
     <style>
       body {
         margin: 0;
-        padding: 24px 16px;
-        font-family: ui-serif, Georgia, "Times New Roman", Times, serif;
-        background: #f6f2ea;
-        color: #1f1b16;
+        padding: 0;
+        background: #060812;
+        color: rgba(225, 215, 195, 0.9);
+        font-family: 'EB Garamond', Garamond, 'Times New Roman', serif;
+      }
+      #root {
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
       }
       .boot {
-        max-width: 980px;
-        margin: 0 auto;
+        text-align: center;
+        padding: 2rem;
       }
       .boot h1 {
         margin: 0;
-        font-size: 30px;
-        font-weight: 600;
-        letter-spacing: 0.2px;
+        font-size: 22px;
+        font-weight: 400;
+        letter-spacing: 0.06em;
+        color: rgba(200, 185, 160, 0.85);
       }
       .boot p {
         margin: 10px 0 0;
-        color: rgba(31, 27, 22, 0.62);
-      }
-      .boot .mono {
-        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-        font-size: 0.92em;
+        color: rgba(200, 185, 160, 0.3);
+        font-style: italic;
       }
     </style>
     <link rel="stylesheet" href="{{ url_for('static_files', filename='assets/app.css') }}" />
@@ -37,13 +47,9 @@
     <div id="root">
       <div class="boot">
         <h1>gutemgrep</h1>
-        <p>semantic search through old paper</p>
-        <p class="mono">loading…</p>
-        <p class="mono">
-          If this stays, check that <span class="mono">/static/assets/app.js</span> is loading.
-        </p>
+        <p>loading…</p>
         <noscript>
-          <p class="mono">Enable JavaScript to use search.</p>
+          <p>Enable JavaScript to use search.</p>
         </noscript>
       </div>
     </div>

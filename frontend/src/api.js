@@ -36,3 +36,18 @@ export async function getSavedQuery({ token }) {
   return data;
 }
 
+export async function getBookByEmbed({ embedId }) {
+  const resp = await fetch(`/book/by-embed/${encodeURIComponent(embedId)}`, {
+    method: "GET",
+    headers: { Accept: "application/json" }
+  });
+  const data = await resp.json().catch(() => null);
+  if (!resp.ok) {
+    const message = data?.error || `Request failed (${resp.status})`;
+    throw new Error(message);
+  }
+  if (data?.ok === false) {
+    throw new Error(data?.error || "Request failed");
+  }
+  return data;
+}
