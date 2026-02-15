@@ -702,6 +702,19 @@ export default function GutemGrep() {
   const clearTimers = () => { timersRef.current.forEach(clearTimeout); timersRef.current = []; };
   const later = (fn, ms) => { const t = setTimeout(fn, ms); timersRef.current.push(t); };
 
+  // Force plain-text-only copy so the clipboard gets _underscores_ and --
+  // instead of HTML with <em> tags and em-dash characters.
+  useEffect(() => {
+    const handler = (e) => {
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed) return;
+      e.preventDefault();
+      e.clipboardData.setData("text/plain", selection.toString());
+    };
+    document.addEventListener("copy", handler);
+    return () => document.removeEventListener("copy", handler);
+  }, []);
+
   // Load saved query if URL has a token
   useEffect(() => {
     if (!token) return;
