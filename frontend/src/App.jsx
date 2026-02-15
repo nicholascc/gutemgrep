@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import { postQuery, getSavedQuery, getBookByEmbed, createVector, listVectors, queryByVector, mutateText } from "./api.js";
+import { postQuery, getSavedQuery, getBookByEmbed, createVector, lerpVector, listVectors, queryByVector, mutateText } from "./api.js";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -1038,7 +1038,68 @@ function CollectionTab({ count, onClick }) {
 
 // ─── Vectors Sidebar (RIGHT) ────────────────────────────────────────────────
 
-function VectorsSidebar({ vectors, open, onClose, onSearch, onDelete }) {
+function VectorsSidebar({ vectors, open, onClose, onSearch, onDelete, onLerpCreate }) {
+  const [showLerp, setShowLerp] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [aId, setAId] = useState("");
+  const [bId, setBId] = useState("");
+  const [alpha, setAlpha] = useState(0.5);
+  const [name, setName] = useState("");
+
+  const hasTwo = vectors.length >= 2;
+
+  const aName = vectors.find((v) => String(v.id) === aId)?.name || (vectors[0]?.name ?? "A");
+  const bName = vectors.find((v) => String(v.id) === bId)?.name || (vectors[1]?.name ?? "B");
+
+  const short = (s) => (String(s).length > 16 ? String(s).slice(0, 16) + "…" : String(s));
+
+  const openLerp = () => {
+    if (!hasTwo) return;
+    const nextA = aId || String(vectors[0].id);
+    const nextB =
+      bId && bId !== nextA
+        ? bId
+        : String((vectors.find((v) => String(v.id) !== nextA) || vectors[1]).id);
+    setAId(nextA);
+    setBId(nextB);
+    setName("");
+    setShowLerp(true);
+  };
+
+  const setA = (next) => {
+    const s = String(next);
+    if (s === bId) {
+      const alt = vectors.find((v) => String(v.id) !== s);
+      if (alt) setBId(String(alt.id));
+    }
+    setAId(s);
+  };
+
+  const setB = (next) => {
+    const s = String(next);
+    if (s === aId) {
+      const alt = vectors.find((v) => String(v.id) !== s);
+      if (alt) setAId(String(alt.id));
+    }
+    setBId(s);
+  };
+
+  const handleCreate = async () => {
+    if (!onLerpCreate) return;
+    if (!hasTwo) return;
+    if (!name.trim()) return;
+    if (!aId || !bId || aId === bId) return;
+    setCreating(true);
+    try {
+      await onLerpCreate(name.trim(), Number(aId), Number(bId), alpha);
+      setShowLerp(false);
+      setName("");
+      setAlpha(0.5);
+    } finally {
+      setCreating(false);
+    }
+  };
+
   return (
     <div style={{
       position: "fixed", right: 0, top: 0, bottom: 0, width: 340,
@@ -1068,13 +1129,165 @@ function VectorsSidebar({ vectors, open, onClose, onSearch, onDelete }) {
           ))
         )}
       </div>
+
+      <div style={{ flexShrink: 0, borderTop: `1px solid ${WARM(0.06)}`, paddingTop: 14, marginTop: 14 }}>
+        {!showLerp ? (
+          <button
+            onClick={openLerp}
+            disabled={!hasTwo}
+            style={{
+              width: "100%",
+              background: WARM(!hasTwo ? 0.03 : 0.08),
+              border: `1px solid ${WARM(!hasTwo ? 0.06 : 0.15)}`,
+              borderRadius: 3,
+              padding: "10px 16px",
+              fontFamily: FONT,
+              fontStyle: "italic",
+              fontSize: 14,
+              color: WARM(!hasTwo ? 0.35 : 0.7),
+              cursor: !hasTwo ? "not-allowed" : "pointer",
+              transition: "all 0.3s ease",
+            }}
+            title={!hasTwo ? "Need at least two vectors" : "Interpolate between two saved vectors"}
+          >
+            interpolate
+          </button>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <div style={{ fontFamily: FONT, fontStyle: "italic", fontSize: 13.5, color: WARM(0.55) }}>
+              interpolate
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <select
+                value={aId}
+                onChange={(e) => setA(e.target.value)}
+                style={{
+                  width: "100%",
+                  maxWidth: "100%",
+                  minWidth: 0,
+                  background: "rgba(18, 16, 24, 0.6)",
+                  border: `1px solid ${WARM(0.12)}`,
+                  borderRadius: 3,
+                  padding: "8px 10px",
+                  fontFamily: FONT,
+                  fontSize: 13,
+                  color: PARCHMENT(0.85),
+                  outline: "none",
+                }}
+              >
+                {vectors.map((v) => (
+                  <option key={v.id} value={String(v.id)} style={{ color: "#000" }}>
+                    {v.name}
+                  </option>
+                ))}
+              </select>
+              <select
+                value={bId}
+                onChange={(e) => setB(e.target.value)}
+                style={{
+                  width: "100%",
+                  maxWidth: "100%",
+                  minWidth: 0,
+                  background: "rgba(18, 16, 24, 0.6)",
+                  border: `1px solid ${WARM(0.12)}`,
+                  borderRadius: 3,
+                  padding: "8px 10px",
+                  fontFamily: FONT,
+                  fontSize: 13,
+                  color: PARCHMENT(0.85),
+                  outline: "none",
+                }}
+              >
+                {vectors.map((v) => (
+                  <option key={v.id} value={String(v.id)} style={{ color: "#000" }}>
+                    {v.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <input
+              className="quire-range"
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              value={alpha}
+              onChange={(e) => setAlpha(Number(e.target.value))}
+            />
+            <div style={{ fontFamily: FONT, fontStyle: "italic", fontSize: 12.5, color: WARM(0.35), lineHeight: 1.4, textAlign: "center" }}>
+              {Math.round((1 - alpha) * 100)}% {short(aName)}, {Math.round(alpha * 100)}% {short(bName)}
+            </div>
+
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") handleCreate(); }}
+              placeholder={"name this vector…"}
+              autoFocus
+              style={{
+                width: "100%",
+                background: "rgba(18, 16, 24, 0.6)",
+                border: `1px solid ${WARM(0.15)}`,
+                borderRadius: 3,
+                padding: "10px 14px",
+                fontFamily: FONT,
+                fontStyle: "italic",
+                fontSize: 14,
+                color: PARCHMENT(0.85),
+                outline: "none",
+              }}
+            />
+
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                onClick={handleCreate}
+                disabled={creating || !name.trim() || !aId || !bId || aId === bId}
+                style={{
+                  flex: 1,
+                  background: WARM(creating ? 0.04 : 0.1),
+                  border: `1px solid ${WARM(0.2)}`,
+                  borderRadius: 3,
+                  padding: "8px 12px",
+                  fontFamily: FONT,
+                  fontStyle: "italic",
+                  fontSize: 13,
+                  color: WARM(creating ? 0.4 : 0.7),
+                  cursor: creating ? "wait" : "pointer",
+                }}
+              >
+                {creating ? "creating…" : "create"}
+              </button>
+              <button
+                onClick={() => { setShowLerp(false); setName(""); setAlpha(0.5); }}
+                style={{
+                  background: "none",
+                  border: `1px solid ${WARM(0.1)}`,
+                  borderRadius: 3,
+                  padding: "8px 12px",
+                  fontFamily: FONT,
+                  fontSize: 13,
+                  color: WARM(0.4),
+                  cursor: "pointer",
+                }}
+              >
+                cancel
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
 
 function VectorCard({ vector, onSearch, onDelete }) {
   const [hovered, setHovered] = useState(false);
-  const sourceCount = (vector.source_embed_ids?.length || 0) + (vector.source_texts?.length || 0);
+  const sourceCount =
+    (vector.source_embed_ids?.length || 0) +
+    (vector.source_texts?.length || 0) +
+    (vector.source_vector_ids?.length || 0);
 
   return (
     <div
@@ -1494,6 +1707,26 @@ export default function GutemGrep() {
     setCollectionOpen(false);
   }, []);
 
+  const handleLerpVector = useCallback(async (name, aVectorId, bVectorId, alpha) => {
+    const resp = await lerpVector({ name, aVectorId, bVectorId, alpha });
+    const newVector = {
+      id: resp.id,
+      name: resp.name,
+      source_embed_ids: resp.source_embed_ids,
+      source_texts: resp.source_texts,
+      source_vector_ids: resp.source_vector_ids,
+      source_vector_weights: resp.source_vector_weights,
+      created_at: resp.created_at,
+    };
+    setVectors(prev => {
+      const next = [...prev, newVector];
+      saveVectorIds(next.map(v => v.id));
+      return next;
+    });
+    setVectorsOpen(true);
+    setCollectionOpen(false);
+  }, []);
+
   const handleDeleteVector = useCallback((vectorId) => {
     setVectors(prev => {
       const next = prev.filter(v => v.id !== vectorId);
@@ -1578,6 +1811,7 @@ export default function GutemGrep() {
         onClose={() => setVectorsOpen(false)}
         onSearch={doSearchByVector}
         onDelete={handleDeleteVector}
+        onLerpCreate={handleLerpVector}
       />
       {!vectorsOpen && <VectorsTab count={vectors.length} onClick={() => setVectorsOpen(true)} />}
 

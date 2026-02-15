@@ -73,6 +73,28 @@ export async function createVector({ name, embedIds = [], customTexts = [] }) {
   return data;
 }
 
+export async function lerpVector({ name, aVectorId, bVectorId, alpha }) {
+  const resp = await fetch("/vectors/lerp", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      name,
+      a_vector_id: aVectorId,
+      b_vector_id: bVectorId,
+      alpha
+    })
+  });
+  const data = await resp.json().catch(() => null);
+  if (!resp.ok) {
+    const message = data?.error || `Request failed (${resp.status})`;
+    throw new Error(message);
+  }
+  if (data?.ok === false) {
+    throw new Error(data?.error || "Request failed");
+  }
+  return data;
+}
+
 export async function listVectors({ ids }) {
   const resp = await fetch("/vectors/list", {
     method: "POST",

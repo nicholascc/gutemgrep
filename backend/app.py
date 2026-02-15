@@ -285,10 +285,19 @@ def _ensure_queries_schema(conn: sqlite3.Connection) -> None:
           embedding BLOB NOT NULL,
           source_embed_ids TEXT,
           source_texts TEXT,
+          source_vector_ids TEXT,
+          source_vector_weights TEXT,
           created_at DATETIME
         )
         """
     )
+
+    # Backfill columns for existing DBs created before vector provenance existed.
+    cols = set(_table_columns(conn, "custom_vectors"))
+    if "source_vector_ids" not in cols:
+        conn.execute("ALTER TABLE custom_vectors ADD COLUMN source_vector_ids TEXT")
+    if "source_vector_weights" not in cols:
+        conn.execute("ALTER TABLE custom_vectors ADD COLUMN source_vector_weights TEXT")
     conn.commit()
 
 
@@ -1352,8 +1361,110 @@ def create_app() -> Flask:
             "name": name,
             "source_embed_ids": embed_ids,
             "source_texts": custom_texts,
+            "source_vector_ids": [],
+            "source_vector_weights": [],
             "created_at": created_at,
         })
+
+    @app.post("/vectors/lerp")
+    def lerp_vector() -> Response:
+        cfg: AppConfig = app.config["APP_CONFIG"]
+        body = request.get_json(silent=True) or {}
+        name = body.get("name", "").strip()
+        if not name:
+            return jsonify({"ok": False, "error": "Missing 'name'"}), 400
+
+        a_vector_id = body.get("a_vector_id")
+        b_vector_id = body.get("b_vector_id")
+        if a_vector_id is None or b_vector_id is None:
+            return jsonify({"ok": False, "error": "Missing 'a_vector_id' or 'b_vector_id'"}), 400
+
+        try:
+            a_id = int(a_vector_id)
+            b_id = int(b_vector_id)
+        except Exception:
+            return jsonify({"ok": False, "error": "'a_vector_id' and 'b_vector_id' must be integers"}), 400
+        if a_id <= 0 or b_id <= 0:
+            return jsonify({"ok": False, "error": "Vector ids must be positive"}), 400
+        if a_id == b_id:
+            return jsonify({"ok": False, "error": "Vector ids must be different"}), 400
+
+        alpha_raw = body.get("alpha", 0.5)
+        try:
+            alpha = float(alpha_raw)
+        except Exception:
+            return jsonify({"ok": False, "error": "'alpha' must be a number"}), 400
+        if not (0.0 <= alpha <= 1.0):
+            return jsonify({"ok": False, "error": "'alpha' must be between 0 and 1"}), 400
+
+        with _connect_sqlite(cfg.queries_db_path) as conn:
+            _ensure_queries_schema(conn)
+            row_a = conn.execute(
+                "SELECT embedding, source_embed_ids FROM custom_vectors WHERE id = ?",
+                (a_id,),
+            ).fetchone()
+            row_b = conn.execute(
+                "SELECT embedding, source_embed_ids FROM custom_vectors WHERE id = ?",
+                (b_id,),
+            ).fetchone()
+            if row_a is None or row_b is None:
+                return jsonify({"ok": False, "error": "Vector not found"}), 404
+
+            a_vec = np.frombuffer(row_a["embedding"], dtype=np.float32).copy()
+            b_vec = np.frombuffer(row_b["embedding"], dtype=np.float32).copy()
+            if a_vec.size == 0 or b_vec.size == 0:
+                return jsonify({"ok": False, "error": "Vector embedding is empty"}), 400
+            if a_vec.shape != b_vec.shape:
+                return jsonify({"ok": False, "error": "Vector dimensions do not match"}), 400
+
+            out_vec = ((1.0 - alpha) * a_vec + alpha * b_vec).astype(np.float32)
+            norm = float(np.linalg.norm(out_vec))
+            if norm > 0:
+                out_vec = out_vec / norm
+
+            # Exclude the source passages of both source vectors on later searches.
+            src_ids: set[int] = set()
+            if row_a["source_embed_ids"]:
+                try:
+                    src_ids |= {int(i) for i in json.loads(row_a["source_embed_ids"])}
+                except Exception:
+                    pass
+            if row_b["source_embed_ids"]:
+                try:
+                    src_ids |= {int(i) for i in json.loads(row_b["source_embed_ids"])}
+                except Exception:
+                    pass
+            source_embed_ids = sorted(src_ids) if src_ids else []
+
+            created_at = datetime.now(timezone.utc).isoformat()
+            cursor = conn.execute(
+                "INSERT INTO custom_vectors (name, embedding, source_embed_ids, source_texts, source_vector_ids, source_vector_weights, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    name,
+                    out_vec.tobytes(),
+                    json.dumps(source_embed_ids) if source_embed_ids else None,
+                    None,
+                    json.dumps([a_id, b_id]),
+                    json.dumps([1.0 - alpha, alpha]),
+                    created_at,
+                ),
+            )
+            vector_id = cursor.lastrowid
+            conn.commit()
+
+        return jsonify(
+            {
+                "ok": True,
+                "id": vector_id,
+                "name": name,
+                "source_embed_ids": source_embed_ids,
+                "source_texts": [],
+                "source_vector_ids": [a_id, b_id],
+                "source_vector_weights": [1.0 - alpha, alpha],
+                "created_at": created_at,
+            }
+        )
 
     @app.get("/vectors/<int:vector_id>")
     def get_vector(vector_id: int) -> Response:
@@ -1361,7 +1472,8 @@ def create_app() -> Flask:
         with _connect_sqlite(cfg.queries_db_path) as conn:
             _ensure_queries_schema(conn)
             row = conn.execute(
-                "SELECT id, name, source_embed_ids, source_texts, created_at FROM custom_vectors WHERE id = ?",
+                "SELECT id, name, source_embed_ids, source_texts, source_vector_ids, source_vector_weights, created_at "
+                "FROM custom_vectors WHERE id = ?",
                 (vector_id,),
             ).fetchone()
             if row is None:
@@ -1371,6 +1483,8 @@ def create_app() -> Flask:
                 "name": str(row["name"]),
                 "source_embed_ids": json.loads(row["source_embed_ids"]) if row["source_embed_ids"] else [],
                 "source_texts": json.loads(row["source_texts"]) if row["source_texts"] else [],
+                "source_vector_ids": json.loads(row["source_vector_ids"]) if row["source_vector_ids"] else [],
+                "source_vector_weights": json.loads(row["source_vector_weights"]) if row["source_vector_weights"] else [],
                 "created_at": str(row["created_at"]) if row["created_at"] else None,
             })
 
@@ -1386,7 +1500,7 @@ def create_app() -> Flask:
             _ensure_queries_schema(conn)
             placeholders = ",".join(["?"] * len(ids))
             rows = conn.execute(
-                f"SELECT id, name, source_embed_ids, source_texts, created_at "
+                f"SELECT id, name, source_embed_ids, source_texts, source_vector_ids, source_vector_weights, created_at "
                 f"FROM custom_vectors WHERE id IN ({placeholders})",
                 ids,
             ).fetchall()
@@ -1397,6 +1511,8 @@ def create_app() -> Flask:
                     "name": str(row["name"]),
                     "source_embed_ids": json.loads(row["source_embed_ids"]) if row["source_embed_ids"] else [],
                     "source_texts": json.loads(row["source_texts"]) if row["source_texts"] else [],
+                    "source_vector_ids": json.loads(row["source_vector_ids"]) if row["source_vector_ids"] else [],
+                    "source_vector_weights": json.loads(row["source_vector_weights"]) if row["source_vector_weights"] else [],
                     "created_at": str(row["created_at"]) if row["created_at"] else None,
                 })
             return jsonify({"vectors": vectors})
