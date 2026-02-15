@@ -1306,16 +1306,22 @@ def create_app() -> Flask:
         include_context = body.get("include_context", True)
         include_context_bool = bool(include_context)
 
-        # Load the custom vector
+        # Load the custom vector and its source embed_ids
         with _connect_sqlite(cfg.queries_db_path) as conn:
             _ensure_queries_schema(conn)
             row = conn.execute(
-                "SELECT embedding FROM custom_vectors WHERE id = ?",
+                "SELECT embedding, source_embed_ids FROM custom_vectors WHERE id = ?",
                 (int(vector_id),),
             ).fetchone()
             if row is None:
                 return jsonify({"ok": False, "error": "Vector not found"}), 404
             query_vec = np.frombuffer(row["embedding"], dtype=np.float32).copy()
+            exclude_ids: set = set()
+            if row["source_embed_ids"]:
+                exclude_ids = set(json.loads(row["source_embed_ids"]))
+
+        # Over-fetch to compensate for excluded source passages
+        fetch_k = top_k_int + len(exclude_ids)
 
         try:
             search_start = time.perf_counter()
@@ -1359,7 +1365,7 @@ def create_app() -> Flask:
                     embedding_db_path=cfg.embedding_db_path,
                     embeddings_table=cfg.embeddings_table,
                     query_vec=query_vec,
-                    top_k=top_k_int,
+                    top_k=fetch_k,
                     include_context=include_context_bool,
                     index=state["index"],
                 )
@@ -1377,13 +1383,18 @@ def create_app() -> Flask:
                     embedding_db_path=cfg.embedding_db_path,
                     embeddings_table=cfg.embeddings_table,
                     query_vec=query_vec,
-                    top_k=top_k_int,
+                    top_k=fetch_k,
                     include_context=include_context_bool,
                 )
                 search_ms = _timed_ms(search_start)
                 search_metrics = {"method": "brute_force", **search_metrics}
         except Exception as e:
             return jsonify({"ok": False, "error": str(e)}), 500
+
+        # Filter out source passages and trim to requested top_k
+        if exclude_ids:
+            results = [r for r in results if r["embed_id"] not in exclude_ids]
+        results = results[:top_k_int]
 
         query_uuid = str(uuid.uuid4())
         response_body = {"uuid": query_uuid, "results": results, "vector_id": int(vector_id)}
