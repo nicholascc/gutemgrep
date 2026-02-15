@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import { postQuery, getSavedQuery, getBookByEmbed } from "./api.js";
+import { postQuery, getSavedQuery, getBookByEmbed, createVector, listVectors, queryByVector } from "./api.js";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -204,7 +204,7 @@ function CornerButton({ expanded, onClick }) {
 
 // ─── Lateral Carousel (cosine-similar passages) ──────────────────────────────
 
-function SimilarCarousel({ embedId, allResults, onNavigate }) {
+function SimilarCarousel({ embedId, allResults, onNavigate, onCollect, collectedIds }) {
   const items = useMemo(() => {
     if (!allResults || allResults.length === 0) return [];
     return allResults
@@ -234,14 +234,18 @@ function SimilarCarousel({ embedId, allResults, onNavigate }) {
         scrollSnapType: "x mandatory",
       }}>
         {items.map((item) => (
-          <SimilarCard key={item.embed_id} item={item} onClick={() => onNavigate(item)} />
+          <SimilarCard
+            key={item.embed_id} item={item} onClick={() => onNavigate(item)}
+            onCollect={onCollect ? () => onCollect(item) : null}
+            collected={collectedIds ? collectedIds.has(item.embed_id) : false}
+          />
         ))}
       </div>
     </div>
   );
 }
 
-function SimilarCard({ item, onClick }) {
+function SimilarCard({ item, onClick, onCollect, collected }) {
   const [hovered, setHovered] = useState(false);
 
   return (
@@ -269,9 +273,12 @@ function SimilarCard({ item, onClick }) {
         <span style={{ fontFamily: FONT, fontStyle: "italic", fontSize: 12, color: WARM(0.45) }}>
           {renderFormatted(item.book_title)}
         </span>
-        <span style={{ fontFamily: FONT, fontSize: 11, color: WARM(0.25), fontVariantNumeric: "tabular-nums" }}>
-          {item.score.toFixed(3)}
-        </span>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+          {onCollect && <CollectButton collected={collected} onCollect={onCollect} size="small" />}
+          <span style={{ fontFamily: FONT, fontSize: 11, color: WARM(0.25), fontVariantNumeric: "tabular-nums" }}>
+            {item.score.toFixed(3)}
+          </span>
+        </div>
       </div>
     </div>
   );
@@ -279,7 +286,7 @@ function SimilarCard({ item, onClick }) {
 
 // ─── Book Reader (expanded mode) ─────────────────────────────────────────────
 
-function BookReader({ result, allResults, onCollapse, onTextSelect, onNavigateToSimilar, onHighlightMeasured }) {
+function BookReader({ result, allResults, onCollapse, onTextSelect, onNavigateToSimilar, onHighlightMeasured, onCollect, collectedIds }) {
   const scrollRef = useRef(null);
   const highlightRef = useRef(null);
   const [paragraphs, setParagraphs] = useState([]);
@@ -403,7 +410,12 @@ function BookReader({ result, allResults, onCollapse, onTextSelect, onNavigateTo
         {loaded && paragraphs.map((para) => {
           const isHighlight = para.embed_id === result.embed_id;
           return (
-            <BookParagraphWithRef key={para.embed_id} para={para} isHighlight={isHighlight} innerRef={isHighlight ? highlightRef : null} />
+            <BookParagraphWithRef
+              key={para.embed_id} para={para} isHighlight={isHighlight}
+              innerRef={isHighlight ? highlightRef : null}
+              onCollect={onCollect ? (p) => onCollect({ embed_id: p.embed_id, paragraph_text: p.text, book_title: result.book_title, book_id: result.book_id }) : null}
+              collected={collectedIds ? collectedIds.has(para.embed_id) : false}
+            />
           );
         })}
       </div>
@@ -417,13 +429,15 @@ function BookReader({ result, allResults, onCollapse, onTextSelect, onNavigateTo
           embedId={result.embed_id}
           allResults={allResults}
           onNavigate={onNavigateToSimilar}
+          onCollect={onCollect}
+          collectedIds={collectedIds}
         />
       </div>
     </div>
   );
 }
 
-const BookParagraphWithRef = ({ para, isHighlight, innerRef }) => {
+const BookParagraphWithRef = ({ para, isHighlight, innerRef, onCollect, collected }) => {
   const [hovered, setHovered] = useState(false);
   const baseColor = isHighlight ? PARCHMENT(0.92) : DIM(0.4);
   const hoverColor = isHighlight ? PARCHMENT(0.95) : DIM(0.72);
@@ -449,6 +463,11 @@ const BookParagraphWithRef = ({ para, isHighlight, innerRef }) => {
       }}>
         {renderFormatted(para.text)}
       </p>
+      {hovered && onCollect && (
+        <div style={{ marginTop: 4, opacity: 0.8 }}>
+          <CollectButton collected={collected} onCollect={() => onCollect(para)} size="small" />
+        </div>
+      )}
     </div>
   );
 };
@@ -478,18 +497,89 @@ function SelectionTooltip({ text, position, onSearch }) {
   );
 }
 
-// ─── Collection Sidebar ──────────────────────────────────────────────────────
+// ─── localStorage helpers ────────────────────────────────────────────────────
 
-function CollectionSidebar({ items, open, onClose, onSearchAverage }) {
+const LS_COLLECTION_KEY = "gutemgrep_collection";
+const LS_VECTORS_KEY = "gutemgrep_vector_ids";
+
+function loadCollection() {
+  try {
+    const raw = localStorage.getItem(LS_COLLECTION_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+
+function saveCollection(items) {
+  try { localStorage.setItem(LS_COLLECTION_KEY, JSON.stringify(items)); } catch {}
+}
+
+function loadVectorIds() {
+  try {
+    const raw = localStorage.getItem(LS_VECTORS_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+
+function saveVectorIds(ids) {
+  try { localStorage.setItem(LS_VECTORS_KEY, JSON.stringify(ids)); } catch {}
+}
+
+// ─── Collect Button (inline) ─────────────────────────────────────────────────
+
+function CollectButton({ collected, onCollect, size = "normal" }) {
+  const [hovered, setHovered] = useState(false);
+  const fontSize = size === "small" ? 12 : 13;
+
+  return (
+    <button
+      onClick={(e) => { e.stopPropagation(); if (!collected) onCollect(); }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        background: "none", border: "none", fontFamily: FONT,
+        fontStyle: "italic", fontSize, padding: "2px 0",
+        color: collected ? WARM(0.55) : WARM(hovered ? 0.8 : 0.4),
+        cursor: collected ? "default" : "pointer",
+        transition: "color 0.3s ease", whiteSpace: "nowrap",
+      }}
+    >
+      {collected ? "\u2713 collected" : "+ collect"}
+    </button>
+  );
+}
+
+// ─── Collection Sidebar (LEFT) ──────────────────────────────────────────────
+
+function CollectionSidebar({ items, open, onClose, onRemove, selected, onToggleSelect, onCreateVector, customTexts, onAddCustomText, onRemoveCustomText }) {
+  const [newText, setNewText] = useState("");
+  const [vectorName, setVectorName] = useState("");
+  const [showNaming, setShowNaming] = useState(false);
+  const [creating, setCreating] = useState(false);
+
+  const hasSelection = selected.size > 0 || customTexts.length > 0;
+
+  const handleCreate = async () => {
+    if (!vectorName.trim()) return;
+    setCreating(true);
+    try {
+      await onCreateVector(vectorName.trim(), selected, customTexts);
+      setVectorName("");
+      setShowNaming(false);
+    } finally {
+      setCreating(false);
+    }
+  };
+
   return (
     <div style={{
-      position: "fixed", right: 0, top: 0, bottom: 0, width: 360,
+      position: "fixed", left: 0, top: 0, bottom: 0, width: 360,
       background: "rgba(12, 10, 20, 0.95)", backdropFilter: "blur(20px)",
-      borderLeft: `1px solid ${WARM(0.08)}`, zIndex: 50,
-      transform: open ? "translateX(0)" : "translateX(100%)",
-      transition: "transform 0.4s ease", padding: "40px 28px", overflowY: "auto",
+      borderRight: `1px solid ${WARM(0.08)}`, zIndex: 50,
+      transform: open ? "translateX(0)" : "translateX(-100%)",
+      transition: "transform 0.4s ease", padding: "40px 28px",
+      display: "flex", flexDirection: "column",
     }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 32 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 24, flexShrink: 0 }}>
         <h3 style={{ fontFamily: FONT, fontStyle: "italic", fontSize: 18, color: WARM(0.8), margin: 0, fontWeight: 400 }}>
           collected passages
         </h3>
@@ -497,24 +587,121 @@ function CollectionSidebar({ items, open, onClose, onSearchAverage }) {
           close
         </button>
       </div>
-      {items.length === 0 ? (
-        <p style={{ fontFamily: FONT, fontStyle: "italic", fontSize: 14, color: WARM(0.3), lineHeight: 1.7 }}>
-          {"Click \u201c+ collect\u201d on any passage to build a set. Search the centroid of your collection \u2014 the average embedding of everything you\u2019ve gathered."}
-        </p>
-      ) : (
-        <>
-          {items.map((item, i) => (
-            <div key={i} style={{ padding: "14px 0", borderBottom: `1px solid ${WARM(0.06)}` }}>
-              <p style={{ fontFamily: FONT, fontSize: 14, lineHeight: 1.65, color: DIM(0.7), margin: "0 0 6px 0" }}>
-                {renderFormatted(item.paragraph_text.slice(0, 120) + "\u2026")}
-              </p>
-              <span style={{ fontFamily: FONT, fontStyle: "italic", fontSize: 12, color: WARM(0.35) }}>{renderFormatted(item.book_title)}</span>
-            </div>
-          ))}
-          <button
-            onClick={onSearchAverage}
+
+      <div style={{ flex: 1, overflowY: "auto", marginBottom: 16 }}>
+        {items.length === 0 && customTexts.length === 0 ? (
+          <p style={{ fontFamily: FONT, fontStyle: "italic", fontSize: 14, color: WARM(0.3), lineHeight: 1.7 }}>
+            {"Click \u201c+ collect\u201d on any passage to save it here. Select passages and create an averaged embedding vector for similarity search."}
+          </p>
+        ) : (
+          <>
+            {items.map((item) => {
+              const isSelected = selected.has(item.embed_id);
+              return (
+                <div key={item.embed_id} style={{
+                  display: "flex", gap: 10, padding: "12px 0",
+                  borderBottom: `1px solid ${WARM(0.06)}`, alignItems: "flex-start",
+                }}>
+                  <input
+                    type="checkbox"
+                    checked={isSelected}
+                    onChange={() => onToggleSelect(item.embed_id)}
+                    style={{ marginTop: 4, flexShrink: 0, accentColor: WARM(0.6), cursor: "pointer" }}
+                  />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <p style={{ fontFamily: FONT, fontSize: 13.5, lineHeight: 1.6, color: DIM(isSelected ? 0.85 : 0.65), margin: "0 0 4px 0", transition: "color 0.2s ease" }}>
+                      {renderFormatted(item.paragraph_text.length > 100 ? item.paragraph_text.slice(0, 100) + "\u2026" : item.paragraph_text)}
+                    </p>
+                    <span style={{ fontFamily: FONT, fontStyle: "italic", fontSize: 11.5, color: WARM(0.3) }}>{renderFormatted(item.book_title)}</span>
+                  </div>
+                  <button
+                    onClick={() => onRemove(item.embed_id)}
+                    style={{
+                      background: "none", border: "none", color: WARM(0.25),
+                      cursor: "pointer", fontSize: 16, lineHeight: 1, padding: "2px 4px",
+                      flexShrink: 0, transition: "color 0.2s ease",
+                    }}
+                    onMouseEnter={(e) => (e.target.style.color = WARM(0.6))}
+                    onMouseLeave={(e) => (e.target.style.color = WARM(0.25))}
+                    title="Remove from collection"
+                  >
+                    {"\u00d7"}
+                  </button>
+                </div>
+              );
+            })}
+
+            {customTexts.map((text, i) => (
+              <div key={`custom-${i}`} style={{
+                display: "flex", gap: 10, padding: "12px 0",
+                borderBottom: `1px solid ${WARM(0.06)}`, alignItems: "flex-start",
+              }}>
+                <div style={{ width: 16, flexShrink: 0, marginTop: 4, textAlign: "center" }}>
+                  <span style={{ fontFamily: FONT, fontSize: 10, color: WARM(0.35) }}>T</span>
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <p style={{ fontFamily: FONT, fontSize: 13.5, lineHeight: 1.6, color: DIM(0.65), margin: 0, fontStyle: "italic" }}>
+                    {text.length > 100 ? text.slice(0, 100) + "\u2026" : text}
+                  </p>
+                  <span style={{ fontFamily: FONT, fontSize: 11.5, color: WARM(0.3), fontStyle: "italic" }}>custom text</span>
+                </div>
+                <button
+                  onClick={() => onRemoveCustomText(i)}
+                  style={{
+                    background: "none", border: "none", color: WARM(0.25),
+                    cursor: "pointer", fontSize: 16, lineHeight: 1, padding: "2px 4px",
+                    flexShrink: 0, transition: "color 0.2s ease",
+                  }}
+                  onMouseEnter={(e) => (e.target.style.color = WARM(0.6))}
+                  onMouseLeave={(e) => (e.target.style.color = WARM(0.25))}
+                >
+                  {"\u00d7"}
+                </button>
+              </div>
+            ))}
+          </>
+        )}
+      </div>
+
+      {/* Custom text input */}
+      <div style={{ flexShrink: 0, borderTop: `1px solid ${WARM(0.06)}`, paddingTop: 14 }}>
+        <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+          <input
+            type="text"
+            value={newText}
+            onChange={(e) => setNewText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && newText.trim()) {
+                onAddCustomText(newText.trim());
+                setNewText("");
+              }
+            }}
+            placeholder={"add custom text\u2026"}
             style={{
-              marginTop: 24, width: "100%", background: WARM(0.08),
+              flex: 1, background: "rgba(18, 16, 24, 0.6)",
+              border: `1px solid ${WARM(0.1)}`, borderRadius: 3,
+              padding: "8px 12px", fontFamily: FONT, fontStyle: "italic",
+              fontSize: 13, color: PARCHMENT(0.8), outline: "none",
+            }}
+          />
+          <button
+            onClick={() => { if (newText.trim()) { onAddCustomText(newText.trim()); setNewText(""); } }}
+            style={{
+              background: WARM(0.06), border: `1px solid ${WARM(0.1)}`, borderRadius: 3,
+              padding: "8px 12px", fontFamily: FONT, fontSize: 13, color: WARM(0.5),
+              cursor: "pointer", flexShrink: 0,
+            }}
+          >
+            add
+          </button>
+        </div>
+
+        {/* Create vector controls */}
+        {hasSelection && !showNaming && (
+          <button
+            onClick={() => setShowNaming(true)}
+            style={{
+              width: "100%", background: WARM(0.08),
               border: `1px solid ${WARM(0.15)}`, borderRadius: 3,
               padding: "10px 16px", fontFamily: FONT, fontStyle: "italic",
               fontSize: 14, color: WARM(0.7), cursor: "pointer", transition: "all 0.3s ease",
@@ -522,17 +709,219 @@ function CollectionSidebar({ items, open, onClose, onSearchAverage }) {
             onMouseEnter={(e) => { e.target.style.background = WARM(0.12); e.target.style.borderColor = WARM(0.25); }}
             onMouseLeave={(e) => { e.target.style.background = WARM(0.08); e.target.style.borderColor = WARM(0.15); }}
           >
-            search centroid of collection
+            create vector ({selected.size} passage{selected.size !== 1 ? "s" : ""}{customTexts.length > 0 ? ` + ${customTexts.length} text` : ""})
           </button>
-        </>
-      )}
+        )}
+
+        {showNaming && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <input
+              type="text"
+              value={vectorName}
+              onChange={(e) => setVectorName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") handleCreate(); }}
+              placeholder={"name this vector\u2026"}
+              autoFocus
+              style={{
+                width: "100%", background: "rgba(18, 16, 24, 0.6)",
+                border: `1px solid ${WARM(0.15)}`, borderRadius: 3,
+                padding: "10px 14px", fontFamily: FONT, fontStyle: "italic",
+                fontSize: 14, color: PARCHMENT(0.85), outline: "none",
+              }}
+            />
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                onClick={handleCreate}
+                disabled={creating || !vectorName.trim()}
+                style={{
+                  flex: 1, background: WARM(creating ? 0.04 : 0.1),
+                  border: `1px solid ${WARM(0.2)}`, borderRadius: 3,
+                  padding: "8px 12px", fontFamily: FONT, fontStyle: "italic",
+                  fontSize: 13, color: WARM(creating ? 0.4 : 0.7),
+                  cursor: creating ? "wait" : "pointer",
+                }}
+              >
+                {creating ? "creating\u2026" : "create"}
+              </button>
+              <button
+                onClick={() => { setShowNaming(false); setVectorName(""); }}
+                style={{
+                  background: "none", border: `1px solid ${WARM(0.1)}`, borderRadius: 3,
+                  padding: "8px 12px", fontFamily: FONT, fontSize: 13, color: WARM(0.4),
+                  cursor: "pointer",
+                }}
+              >
+                cancel
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
+  );
+}
+
+// ─── Collection Tab (closed indicator) ──────────────────────────────────────
+
+function CollectionTab({ count, onClick }) {
+  const [hovered, setHovered] = useState(false);
+
+  return (
+    <button
+      onClick={onClick}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        position: "fixed", left: 0, top: "50%", transform: "translateY(-50%)",
+        zIndex: 49, background: hovered ? "rgba(12, 10, 20, 0.95)" : "rgba(12, 10, 20, 0.85)",
+        border: `1px solid ${WARM(hovered ? 0.2 : 0.1)}`, borderLeft: "none",
+        borderRadius: "0 6px 6px 0", padding: "16px 10px",
+        cursor: "pointer", backdropFilter: "blur(12px)",
+        transition: "all 0.3s ease", display: "flex", flexDirection: "column",
+        alignItems: "center", gap: 6,
+      }}
+    >
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+        <rect x="2" y="2" width="12" height="12" rx="1.5" stroke={WARM(hovered ? 0.7 : 0.45)} strokeWidth="1.5" fill="none" />
+        <line x1="5" y1="5.5" x2="11" y2="5.5" stroke={WARM(hovered ? 0.5 : 0.3)} strokeWidth="1" />
+        <line x1="5" y1="8" x2="11" y2="8" stroke={WARM(hovered ? 0.5 : 0.3)} strokeWidth="1" />
+        <line x1="5" y1="10.5" x2="9" y2="10.5" stroke={WARM(hovered ? 0.5 : 0.3)} strokeWidth="1" />
+      </svg>
+      {count > 0 && (
+        <span style={{
+          fontFamily: FONT, fontSize: 11, color: WARM(hovered ? 0.7 : 0.45),
+          fontVariantNumeric: "tabular-nums",
+        }}>
+          {count}
+        </span>
+      )}
+    </button>
+  );
+}
+
+// ─── Vectors Sidebar (RIGHT) ────────────────────────────────────────────────
+
+function VectorsSidebar({ vectors, open, onClose, onSearch, onDelete }) {
+  return (
+    <div style={{
+      position: "fixed", right: 0, top: 0, bottom: 0, width: 340,
+      background: "rgba(12, 10, 20, 0.95)", backdropFilter: "blur(20px)",
+      borderLeft: `1px solid ${WARM(0.08)}`, zIndex: 50,
+      transform: open ? "translateX(0)" : "translateX(100%)",
+      transition: "transform 0.4s ease", padding: "40px 28px",
+      display: "flex", flexDirection: "column",
+    }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 24, flexShrink: 0 }}>
+        <h3 style={{ fontFamily: FONT, fontStyle: "italic", fontSize: 18, color: WARM(0.8), margin: 0, fontWeight: 400 }}>
+          saved vectors
+        </h3>
+        <button onClick={onClose} style={{ background: "none", border: "none", fontFamily: FONT, fontSize: 14, color: WARM(0.4), cursor: "pointer" }}>
+          close
+        </button>
+      </div>
+
+      <div style={{ flex: 1, overflowY: "auto" }}>
+        {vectors.length === 0 ? (
+          <p style={{ fontFamily: FONT, fontStyle: "italic", fontSize: 14, color: WARM(0.3), lineHeight: 1.7 }}>
+            {"Create vectors from your collected passages. Each vector is an averaged embedding you can search by."}
+          </p>
+        ) : (
+          vectors.map((v) => (
+            <VectorCard key={v.id} vector={v} onSearch={() => onSearch(v)} onDelete={() => onDelete(v.id)} />
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+function VectorCard({ vector, onSearch, onDelete }) {
+  const [hovered, setHovered] = useState(false);
+  const sourceCount = (vector.source_embed_ids?.length || 0) + (vector.source_texts?.length || 0);
+
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        padding: "14px 0", borderBottom: `1px solid ${WARM(0.06)}`,
+        transition: "background 0.2s ease",
+      }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
+        <span style={{ fontFamily: FONT, fontSize: 15, color: WARM(hovered ? 0.85 : 0.7), transition: "color 0.2s ease" }}>
+          {vector.name}
+        </span>
+        <button
+          onClick={onDelete}
+          style={{
+            background: "none", border: "none", color: WARM(0.2),
+            cursor: "pointer", fontSize: 14, padding: "0 4px",
+            transition: "color 0.2s ease",
+          }}
+          onMouseEnter={(e) => (e.target.style.color = WARM(0.5))}
+          onMouseLeave={(e) => (e.target.style.color = WARM(0.2))}
+        >
+          {"\u00d7"}
+        </button>
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <span style={{ fontFamily: FONT, fontStyle: "italic", fontSize: 12, color: WARM(0.3) }}>
+          {sourceCount} source{sourceCount !== 1 ? "s" : ""}
+        </span>
+        <button
+          onClick={onSearch}
+          style={{
+            background: WARM(hovered ? 0.1 : 0.06), border: `1px solid ${WARM(hovered ? 0.2 : 0.1)}`,
+            borderRadius: 3, padding: "5px 14px", fontFamily: FONT, fontStyle: "italic",
+            fontSize: 12, color: WARM(hovered ? 0.7 : 0.5), cursor: "pointer",
+            transition: "all 0.25s ease",
+          }}
+        >
+          search
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function VectorsTab({ count, onClick }) {
+  const [hovered, setHovered] = useState(false);
+
+  if (count === 0) return null;
+
+  return (
+    <button
+      onClick={onClick}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        position: "fixed", right: 0, top: "50%", transform: "translateY(-50%)",
+        zIndex: 49, background: hovered ? "rgba(12, 10, 20, 0.95)" : "rgba(12, 10, 20, 0.85)",
+        border: `1px solid ${WARM(hovered ? 0.2 : 0.1)}`, borderRight: "none",
+        borderRadius: "6px 0 0 6px", padding: "16px 10px",
+        cursor: "pointer", backdropFilter: "blur(12px)",
+        transition: "all 0.3s ease", display: "flex", flexDirection: "column",
+        alignItems: "center", gap: 6,
+      }}
+    >
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+        <circle cx="8" cy="8" r="5.5" stroke={WARM(hovered ? 0.7 : 0.45)} strokeWidth="1.5" fill="none" />
+        <circle cx="8" cy="8" r="2" fill={WARM(hovered ? 0.5 : 0.3)} />
+      </svg>
+      <span style={{
+        fontFamily: FONT, fontSize: 11, color: WARM(hovered ? 0.7 : 0.45),
+        fontVariantNumeric: "tabular-nums",
+      }}>
+        {count}
+      </span>
+    </button>
   );
 }
 
 // ─── Result Card ─────────────────────────────────────────────────────────────
 
-function ResultCard({ result, index, onTextSelect, onExpand, onCollect }) {
+function ResultCard({ result, index, onTextSelect, onExpand, onCollect, collected }) {
   const [visible, setVisible] = useState(false);
   const cardBodyRef = useRef(null);
 
@@ -610,74 +999,15 @@ function ResultCard({ result, index, onTextSelect, onExpand, onCollect }) {
 
       {/* Bottom: collect */}
       <div style={{ display: "flex", gap: 20, marginTop: 10, paddingLeft: 2 }}>
-        <button
-          onClick={() => onCollect(result)}
-          style={{
-            background: "none", border: "none", fontFamily: FONT,
-            fontStyle: "italic", fontSize: 13, color: WARM(0.4),
-            cursor: "pointer", padding: "2px 0", transition: "color 0.3s ease",
-          }}
-          onMouseEnter={(e) => (e.target.style.color = WARM(0.8))}
-          onMouseLeave={(e) => (e.target.style.color = WARM(0.4))}
-        >
-          + collect
-        </button>
+        <CollectButton collected={collected} onCollect={() => onCollect(result)} />
       </div>
-    </div>
-  );
-}
-
-// ─── Floating Card (lifted passage during transition) ────────────────────────
-
-function FloatingCard({ result, rect, target, phase, highlightPos }) {
-  if (!result || !rect) return null;
-
-  const MOVE_MS = 400;
-  const isAtTarget = target === "center";
-
-  const prevTextHeight = result.prev_text ? 58 : 0;
-  const originTop = rect.top + 28 + prevTextHeight;
-  const originLeft = rect.left + 32;
-  const originWidth = rect.width - 64;
-
-  const targetTop = highlightPos ? highlightPos.top : window.innerHeight * 0.3;
-  const targetLeft = highlightPos ? highlightPos.left : originLeft;
-  const targetWidth = highlightPos ? highlightPos.width : originWidth;
-
-  const currentTop = isAtTarget ? targetTop : originTop;
-  const currentLeft = isAtTarget ? targetLeft : originLeft;
-  const currentWidth = isAtTarget ? targetWidth : originWidth;
-
-  let opacity = 1;
-  if (phase === "book-enter") opacity = 0;
-
-  return (
-    <div style={{
-      position: "fixed",
-      top: currentTop,
-      left: currentLeft,
-      width: currentWidth,
-      zIndex: 11,
-      pointerEvents: "none",
-      opacity,
-      transition: `top ${MOVE_MS}ms cubic-bezier(0.4, 0, 0.2, 1), left ${MOVE_MS}ms cubic-bezier(0.4, 0, 0.2, 1), width ${MOVE_MS}ms cubic-bezier(0.4, 0, 0.2, 1), opacity 200ms ease`,
-    }}>
-      <p style={{
-        fontFamily: FONT, fontSize: 18.5, lineHeight: 1.8,
-        color: PARCHMENT(0.92), margin: 0, letterSpacing: "0.01em",
-      }}>
-        {renderFormatted(result.paragraph_text)}
-      </p>
     </div>
   );
 }
 
 // ─── Main App ────────────────────────────────────────────────────────────────
 
-const CURTAIN_MS = 380;
-const CARD_MOVE_MS = 400;
-const CONTENT_MS = 300;
-const CARD_BG = "rgba(22, 20, 28, 1)";
+const FADE_MS = 200;
 
 export default function GutemGrep() {
   const token = useInitialToken();
@@ -685,19 +1015,23 @@ export default function GutemGrep() {
   const [results, setResults] = useState(null);
   const [searching, setSearching] = useState(false);
   const [currentQuery, setCurrentQuery] = useState("");
+  const [activeVectorSearch, setActiveVectorSearch] = useState(null); // { id, name } when searching by vector
   const [selectionTooltip, setSelectionTooltip] = useState({ text: null, position: null });
-  const [collection, setCollection] = useState([]);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [collection, setCollection] = useState(() => loadCollection());
+  const [customTexts, setCustomTexts] = useState([]);
+  const [selectedIds, setSelectedIds] = useState(new Set());
+  const [collectionOpen, setCollectionOpen] = useState(false);
+  const [vectors, setVectors] = useState([]);
+  const [vectorsOpen, setVectorsOpen] = useState(false);
   const [expandedResult, setExpandedResult] = useState(null);
-  const [viewPhase, setViewPhase] = useState("search");
-  const [cardRect, setCardRect] = useState(null);
-  const [curtainTarget, setCurtainTarget] = useState(null);
-  const [floatingTarget, setFloatingTarget] = useState("origin");
-  const [highlightPos, setHighlightPos] = useState(null);
+  const [viewPhase, setViewPhase] = useState("search"); // "search" | "fade-out" | "book" | "fade-out-book"
   const [loadingToken, setLoadingToken] = useState(!!token);
   const timersRef = useRef([]);
   const inputRef = useRef(null);
   const epigraph = useRef(EPIGRAPHS[Math.floor(Math.random() * EPIGRAPHS.length)]);
+
+  // Derived: set of collected embed_ids for O(1) lookup
+  const collectedIds = useMemo(() => new Set(collection.map(c => c.embed_id)), [collection]);
 
   const clearTimers = () => { timersRef.current.forEach(clearTimeout); timersRef.current = []; };
   const later = (fn, ms) => { const t = setTimeout(fn, ms); timersRef.current.push(t); };
@@ -713,6 +1047,19 @@ export default function GutemGrep() {
     };
     document.addEventListener("copy", handler);
     return () => document.removeEventListener("copy", handler);
+  }, []);
+
+  // Persist collection to localStorage
+  useEffect(() => { saveCollection(collection); }, [collection]);
+
+  // Load saved vectors from localStorage on mount
+  useEffect(() => {
+    const ids = loadVectorIds();
+    if (ids.length > 0) {
+      listVectors({ ids }).then(data => {
+        if (data?.vectors) setVectors(data.vectors);
+      }).catch(() => {});
+    }
   }, []);
 
   // Load saved query if URL has a token
@@ -740,54 +1087,23 @@ export default function GutemGrep() {
   }, [token]);
 
   // ── EXPAND ──
-  const doExpand = useCallback((result, rect) => {
+  const doExpand = useCallback((result, _rect) => {
     clearTimers();
     setSelectionTooltip({ text: null, position: null });
     setExpandedResult(result);
-    setCardRect(rect || { top: window.innerHeight / 3, left: window.innerWidth / 4, width: window.innerWidth / 2, height: 200 });
-    setFloatingTarget("origin");
-    setHighlightPos(null);
-    setCurtainTarget("card");
-    setViewPhase("curtain-grow");
-
-    requestAnimationFrame(() => requestAnimationFrame(() => setCurtainTarget("full")));
-
-    later(() => {
-      setViewPhase("card-settle");
-      setFloatingTarget("center");
-
-      later(() => {
-        setViewPhase("book-enter");
-
-        later(() => setViewPhase("book"), CONTENT_MS);
-      }, CARD_MOVE_MS);
-    }, CURTAIN_MS);
+    setViewPhase("fade-out");
+    later(() => setViewPhase("book"), FADE_MS);
   }, []);
 
-  // ── COLLAPSE (exact inverse) ──
+  // ── COLLAPSE ──
   const doCollapse = useCallback(() => {
     clearTimers();
     setSelectionTooltip({ text: null, position: null });
-
-    setFloatingTarget("center");
-    setViewPhase("book-exit");
-
+    setViewPhase("fade-out-book");
     later(() => {
-      setViewPhase("card-return");
-      setFloatingTarget("origin");
-
-      later(() => {
-        setViewPhase("curtain-shrink");
-        setCurtainTarget("card");
-
-        later(() => {
-          setViewPhase("search");
-          setExpandedResult(null);
-          setCurtainTarget(null);
-          setCardRect(null);
-        }, CURTAIN_MS);
-      }, CARD_MOVE_MS);
-    }, CONTENT_MS);
+      setViewPhase("search");
+      setExpandedResult(null);
+    }, FADE_MS);
   }, []);
 
   useEffect(() => () => clearTimers(), []);
@@ -797,13 +1113,10 @@ export default function GutemGrep() {
     setSearching(true);
     setCurrentQuery(searchText);
     setQuery(searchText);
+    setActiveVectorSearch(null);
     setSelectionTooltip({ text: null, position: null });
     setExpandedResult(null);
     setViewPhase("search");
-    setCurtainTarget(null);
-    setCardRect(null);
-    setFloatingTarget("origin");
-    setHighlightPos(null);
 
     try {
       const resp = await postQuery({ query: searchText, topK: 10, includeContext: true });
@@ -817,6 +1130,84 @@ export default function GutemGrep() {
     } finally {
       setSearching(false);
     }
+  }, []);
+
+  const doSearchByVector = useCallback(async (vector) => {
+    setSearching(true);
+    setCurrentQuery(vector.name);
+    setActiveVectorSearch({ id: vector.id, name: vector.name });
+    setQuery("");
+    setSelectionTooltip({ text: null, position: null });
+    setExpandedResult(null);
+    setViewPhase("search");
+    setVectorsOpen(false);
+
+    try {
+      const resp = await queryByVector({ vectorId: vector.id, topK: 10, includeContext: true });
+      setResults(resp.results || []);
+      if (resp.uuid) {
+        window.history.pushState({}, "", `/${resp.uuid}`);
+      }
+    } catch {
+      setResults([]);
+    } finally {
+      setSearching(false);
+    }
+  }, []);
+
+  // ── Collection handlers ──
+  const handleCollect = useCallback((item) => {
+    setCollection(prev => {
+      if (prev.find(c => c.embed_id === item.embed_id)) return prev;
+      return [...prev, { embed_id: item.embed_id, paragraph_text: item.paragraph_text, book_title: item.book_title, book_id: item.book_id }];
+    });
+  }, []);
+
+  const handleRemoveFromCollection = useCallback((embedId) => {
+    setCollection(prev => prev.filter(c => c.embed_id !== embedId));
+    setSelectedIds(prev => { const next = new Set(prev); next.delete(embedId); return next; });
+  }, []);
+
+  const handleToggleSelect = useCallback((embedId) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(embedId)) next.delete(embedId);
+      else next.add(embedId);
+      return next;
+    });
+  }, []);
+
+  const handleAddCustomText = useCallback((text) => {
+    setCustomTexts(prev => [...prev, text]);
+  }, []);
+
+  const handleRemoveCustomText = useCallback((index) => {
+    setCustomTexts(prev => prev.filter((_, i) => i !== index));
+  }, []);
+
+  const handleCreateVector = useCallback(async (name, selectedEmbedIds, texts) => {
+    const embedIds = Array.from(selectedEmbedIds);
+    const resp = await createVector({ name, embedIds, customTexts: texts });
+    const newVector = { id: resp.id, name: resp.name, source_embed_ids: resp.source_embed_ids, source_texts: resp.source_texts, created_at: resp.created_at };
+    setVectors(prev => {
+      const next = [...prev, newVector];
+      saveVectorIds(next.map(v => v.id));
+      return next;
+    });
+    // Clear selections after creating
+    setSelectedIds(new Set());
+    setCustomTexts([]);
+    // Open vectors sidebar to show the new vector
+    setVectorsOpen(true);
+    setCollectionOpen(false);
+  }, []);
+
+  const handleDeleteVector = useCallback((vectorId) => {
+    setVectors(prev => {
+      const next = prev.filter(v => v.id !== vectorId);
+      saveVectorIds(next.map(v => v.id));
+      return next;
+    });
   }, []);
 
   useEffect(() => {
@@ -845,35 +1236,9 @@ export default function GutemGrep() {
     });
   };
 
-  const handleHighlightMeasured = useCallback((pos) => {
-    setHighlightPos(pos);
-  }, []);
-
-  const showSearch = viewPhase === "search" || viewPhase === "curtain-grow" || viewPhase === "card-return" || viewPhase === "curtain-shrink";
-  const showBook = ["curtain-grow", "card-settle", "book-enter", "book", "book-exit"].includes(viewPhase);
-  const bookVisible = ["book-enter", "book", "book-exit"].includes(viewPhase);
-  const showCurtain = !["search", "book"].includes(viewPhase);
-  const showFloating = ["curtain-grow", "card-settle", "book-enter", "book-exit", "card-return", "curtain-shrink"].includes(viewPhase);
+  const showSearch = viewPhase === "search" || viewPhase === "fade-out";
+  const showBook = viewPhase === "book" || viewPhase === "fade-out-book";
   const isHome = results === null && viewPhase === "search" && !loadingToken;
-
-  const curtainStyle = (() => {
-    if (!cardRect) return {};
-    const isAtCard = curtainTarget === "card";
-    return {
-      position: "fixed",
-      zIndex: 10,
-      pointerEvents: "none",
-      background: CARD_BG,
-      border: `1px solid ${isAtCard ? WARM(0.1) : "transparent"}`,
-      borderRadius: isAtCard ? 3 : 0,
-      top: isAtCard ? cardRect.top : 0,
-      left: isAtCard ? cardRect.left : 0,
-      width: isAtCard ? cardRect.width : "100vw",
-      height: isAtCard ? cardRect.height : "100vh",
-      transition: `top ${CURTAIN_MS}ms cubic-bezier(0.4, 0, 0.2, 1), left ${CURTAIN_MS}ms cubic-bezier(0.4, 0, 0.2, 1), width ${CURTAIN_MS}ms cubic-bezier(0.4, 0, 0.2, 1), height ${CURTAIN_MS}ms cubic-bezier(0.4, 0, 0.2, 1), border-radius ${CURTAIN_MS}ms cubic-bezier(0.4, 0, 0.2, 1), border-color ${CURTAIN_MS}ms cubic-bezier(0.4, 0, 0.2, 1), box-shadow ${CURTAIN_MS}ms cubic-bezier(0.4, 0, 0.2, 1)`,
-      boxShadow: isAtCard ? `0 4px 40px rgba(0,0,0,0.3), inset 0 1px 0 ${WARM(0.05)}` : "none",
-    };
-  })();
 
   if (loadingToken) {
     return (
@@ -890,37 +1255,43 @@ export default function GutemGrep() {
       <StarField />
       <Vignette />
 
-      {/* ── CURTAIN ── */}
-      {showCurtain && cardRect && <div style={curtainStyle} />}
-
-      {/* ── FLOATING CARD ── */}
-      {showFloating && expandedResult && cardRect && (
-        <FloatingCard result={expandedResult} rect={cardRect} target={floatingTarget} phase={viewPhase} highlightPos={highlightPos} />
-      )}
-
       <SelectionTooltip
         text={selectionTooltip.text} position={selectionTooltip.position}
         onSearch={(text) => doSearch(text)}
       />
 
+      {/* ── COLLECTION SIDEBAR (LEFT) ── */}
       <CollectionSidebar
-        items={collection} open={sidebarOpen}
-        onClose={() => setSidebarOpen(false)}
-        onSearchAverage={() => {
-          // Search using the text of collected passages concatenated
-          const searchText = collection.map(c => c.paragraph_text).join(" ").slice(0, 500);
-          doSearch(searchText);
-          setSidebarOpen(false);
-        }}
+        items={collection} open={collectionOpen}
+        onClose={() => setCollectionOpen(false)}
+        onRemove={handleRemoveFromCollection}
+        selected={selectedIds}
+        onToggleSelect={handleToggleSelect}
+        onCreateVector={handleCreateVector}
+        customTexts={customTexts}
+        onAddCustomText={handleAddCustomText}
+        onRemoveCustomText={handleRemoveCustomText}
       />
+      {!collectionOpen && <CollectionTab count={collection.length} onClick={() => setCollectionOpen(true)} />}
 
-      <div style={{ position: "relative", zIndex: 2, display: "flex", flexDirection: "column", alignItems: "center", minHeight: "100vh" }}>
+      {/* ── VECTORS SIDEBAR (RIGHT) ── */}
+      <VectorsSidebar
+        vectors={vectors} open={vectorsOpen}
+        onClose={() => setVectorsOpen(false)}
+        onSearch={doSearchByVector}
+        onDelete={handleDeleteVector}
+      />
+      {!vectorsOpen && <VectorsTab count={vectors.length} onClick={() => setVectorsOpen(true)} />}
+
+      <div style={{ position: "relative", zIndex: 2, display: "flex", flexDirection: "column", alignItems: "center", width: "100%", minHeight: "100vh" }}>
 
         {/* ── SEARCH + RESULTS ── */}
         {showSearch && (
           <div style={{
             width: "100%", display: "flex", flexDirection: "column", alignItems: "center",
             pointerEvents: viewPhase === "search" ? "auto" : "none",
+            opacity: viewPhase === "fade-out" ? 0 : 1,
+            transition: `opacity ${FADE_MS}ms ease`,
           }}>
             <header style={{
               width: "100%", maxWidth: 680, padding: "0 24px",
@@ -1005,20 +1376,11 @@ export default function GutemGrep() {
                   marginBottom: 32, paddingBottom: 16, borderBottom: `1px solid ${WARM(0.06)}`,
                 }}>
                   <span style={{ fontFamily: FONT, fontStyle: "italic", fontSize: 14, color: WARM(0.35) }}>
-                    {results.length} passages for {"\u201c"}{currentQuery}{"\u201d"}
+                    {results.length} passages {activeVectorSearch
+                      ? <>{"via vector \u201c"}{activeVectorSearch.name}{"\u201d"}</>
+                      : <>{" for \u201c"}{currentQuery}{"\u201d"}</>
+                    }
                   </span>
-                  <button
-                    onClick={() => setSidebarOpen(true)}
-                    style={{
-                      background: "none", border: "none", fontFamily: FONT,
-                      fontStyle: "italic", fontSize: 13, color: WARM(0.35),
-                      cursor: "pointer", transition: "color 0.3s ease",
-                    }}
-                    onMouseEnter={(e) => (e.target.style.color = WARM(0.7))}
-                    onMouseLeave={(e) => (e.target.style.color = WARM(0.35))}
-                  >
-                    collection ({collection.length})
-                  </button>
                 </div>
 
                 {results.map((result, i) => (
@@ -1026,11 +1388,8 @@ export default function GutemGrep() {
                     key={result.embed_id} result={result} index={i}
                     onTextSelect={handleTextSelect}
                     onExpand={(r, rect) => doExpand(r, rect)}
-                    onCollect={(r) => {
-                      if (!collection.find(c => c.embed_id === r.embed_id)) {
-                        setCollection(prev => [...prev, r]);
-                      }
-                    }}
+                    onCollect={handleCollect}
+                    collected={collectedIds.has(result.embed_id)}
                   />
                 ))}
               </div>
@@ -1044,10 +1403,9 @@ export default function GutemGrep() {
         <div style={{
           position: "fixed", inset: 0,
           display: "flex", flexDirection: "column", alignItems: "center",
-          opacity: bookVisible ? 1 : 0,
-          pointerEvents: bookVisible ? "auto" : "none",
-          animation: viewPhase === "book-enter" ? `bookContentIn ${CONTENT_MS}ms cubic-bezier(0.16, 1, 0.3, 1) both` :
-                     viewPhase === "book-exit" ? `bookContentOut ${CONTENT_MS}ms cubic-bezier(0.7, 0, 0.84, 0) both` : "none",
+          opacity: viewPhase === "fade-out-book" ? 0 : 1,
+          pointerEvents: viewPhase === "book" ? "auto" : "none",
+          transition: `opacity ${FADE_MS}ms ease`,
           zIndex: 12,
         }}>
           <BookReader
@@ -1057,7 +1415,8 @@ export default function GutemGrep() {
             onCollapse={doCollapse}
             onTextSelect={handleTextSelect}
             onNavigateToSimilar={handleNavigateToSimilar}
-            onHighlightMeasured={handleHighlightMeasured}
+            onCollect={handleCollect}
+            collectedIds={collectedIds}
           />
         </div>
       )}

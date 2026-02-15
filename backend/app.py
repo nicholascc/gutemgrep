@@ -277,6 +277,18 @@ def _ensure_queries_schema(conn: sqlite3.Connection) -> None:
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_query_results_uuid ON query_results(uuid)")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS custom_vectors (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL,
+          embedding BLOB NOT NULL,
+          source_embed_ids TEXT,
+          source_texts TEXT,
+          created_at DATETIME
+        )
+        """
+    )
     conn.commit()
 
 
@@ -1208,6 +1220,287 @@ def create_app() -> Flask:
         if data is None:
             return jsonify({"ok": False, "error": "not found"}), 404
         return jsonify(data)
+
+    # ── Custom Vectors ──────────────────────────────────────────────────────
+
+    @app.post("/vectors/create")
+    def create_vector() -> Response:
+        cfg: AppConfig = app.config["APP_CONFIG"]
+        body = request.get_json(silent=True) or {}
+        name = body.get("name", "").strip()
+        if not name:
+            return jsonify({"ok": False, "error": "Missing 'name'"}), 400
+
+        embed_ids: List[int] = [int(i) for i in (body.get("embed_ids") or [])]
+        custom_texts: List[str] = [str(t) for t in (body.get("custom_texts") or []) if str(t).strip()]
+
+        if not embed_ids and not custom_texts:
+            return jsonify({"ok": False, "error": "Need at least one embed_id or custom_text"}), 400
+
+        vectors: List[np.ndarray] = []
+
+        # Fetch pre-embedded vectors from the database
+        if embed_ids:
+            with _connect_sqlite(cfg.embedding_db_path) as conn:
+                placeholders = ",".join(["?"] * len(embed_ids))
+                rows = conn.execute(
+                    f"SELECT embed_id, embedding FROM {cfg.embeddings_table} "
+                    f"WHERE embed_id IN ({placeholders})",
+                    embed_ids,
+                ).fetchall()
+                for row in rows:
+                    blob = row["embedding"]
+                    if blob is not None:
+                        vec = np.frombuffer(blob, dtype=np.float32).copy()
+                        if vec.size > 0:
+                            vectors.append(vec)
+
+        # Embed custom texts via Jina
+        if custom_texts:
+            if not cfg.jina_api_key:
+                return jsonify({"ok": False, "error": "JINA_API_KEY not set"}), 500
+            for text in custom_texts:
+                try:
+                    vec = _jina_embed_text(
+                        api_key=cfg.jina_api_key,
+                        model=cfg.jina_embedding_model,
+                        task=cfg.jina_embedding_task,
+                        text=text,
+                    )
+                    vectors.append(vec)
+                except Exception as e:
+                    return jsonify({"ok": False, "error": f"Embedding failed: {e}"}), 500
+
+        if not vectors:
+            return jsonify({"ok": False, "error": "No valid embeddings found"}), 400
+
+        # Average all vectors
+        avg_vec = np.mean(np.vstack(vectors), axis=0).astype(np.float32)
+        norm = float(np.linalg.norm(avg_vec))
+        if norm > 0:
+            avg_vec = avg_vec / norm
+
+        # Save to custom_vectors table
+        created_at = datetime.now(timezone.utc).isoformat()
+        with _connect_sqlite(cfg.queries_db_path) as conn:
+            _ensure_queries_schema(conn)
+            cursor = conn.execute(
+                "INSERT INTO custom_vectors (name, embedding, source_embed_ids, source_texts, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    name,
+                    avg_vec.tobytes(),
+                    json.dumps(embed_ids) if embed_ids else None,
+                    json.dumps(custom_texts) if custom_texts else None,
+                    created_at,
+                ),
+            )
+            vector_id = cursor.lastrowid
+            conn.commit()
+
+        return jsonify({
+            "ok": True,
+            "id": vector_id,
+            "name": name,
+            "source_embed_ids": embed_ids,
+            "source_texts": custom_texts,
+            "created_at": created_at,
+        })
+
+    @app.get("/vectors/<int:vector_id>")
+    def get_vector(vector_id: int) -> Response:
+        cfg: AppConfig = app.config["APP_CONFIG"]
+        with _connect_sqlite(cfg.queries_db_path) as conn:
+            _ensure_queries_schema(conn)
+            row = conn.execute(
+                "SELECT id, name, source_embed_ids, source_texts, created_at FROM custom_vectors WHERE id = ?",
+                (vector_id,),
+            ).fetchone()
+            if row is None:
+                return jsonify({"ok": False, "error": "Vector not found"}), 404
+            return jsonify({
+                "id": int(row["id"]),
+                "name": str(row["name"]),
+                "source_embed_ids": json.loads(row["source_embed_ids"]) if row["source_embed_ids"] else [],
+                "source_texts": json.loads(row["source_texts"]) if row["source_texts"] else [],
+                "created_at": str(row["created_at"]) if row["created_at"] else None,
+            })
+
+    @app.post("/vectors/list")
+    def list_vectors() -> Response:
+        cfg: AppConfig = app.config["APP_CONFIG"]
+        body = request.get_json(silent=True) or {}
+        ids: List[int] = [int(i) for i in (body.get("ids") or [])]
+        if not ids:
+            return jsonify({"vectors": []})
+
+        with _connect_sqlite(cfg.queries_db_path) as conn:
+            _ensure_queries_schema(conn)
+            placeholders = ",".join(["?"] * len(ids))
+            rows = conn.execute(
+                f"SELECT id, name, source_embed_ids, source_texts, created_at "
+                f"FROM custom_vectors WHERE id IN ({placeholders})",
+                ids,
+            ).fetchall()
+            vectors = []
+            for row in rows:
+                vectors.append({
+                    "id": int(row["id"]),
+                    "name": str(row["name"]),
+                    "source_embed_ids": json.loads(row["source_embed_ids"]) if row["source_embed_ids"] else [],
+                    "source_texts": json.loads(row["source_texts"]) if row["source_texts"] else [],
+                    "created_at": str(row["created_at"]) if row["created_at"] else None,
+                })
+            return jsonify({"vectors": vectors})
+
+    @app.post("/query/by-vector")
+    def query_by_vector() -> Response:
+        req_start = time.perf_counter()
+        perf_before = _sample_perf_snapshot()
+        cfg: AppConfig = app.config["APP_CONFIG"]
+        body = request.get_json(silent=True) or {}
+        vector_id = body.get("vector_id")
+        if vector_id is None:
+            return jsonify({"ok": False, "error": "Missing 'vector_id'"}), 400
+
+        top_k = body.get("top_k", cfg.default_top_k)
+        try:
+            top_k_int = int(top_k)
+        except Exception:
+            return jsonify({"ok": False, "error": "'top_k' must be an integer"}), 400
+        top_k_int = max(1, min(100, top_k_int))
+
+        include_context = body.get("include_context", True)
+        include_context_bool = bool(include_context)
+
+        # Load the custom vector and its source embed_ids
+        with _connect_sqlite(cfg.queries_db_path) as conn:
+            _ensure_queries_schema(conn)
+            row = conn.execute(
+                "SELECT embedding, source_embed_ids FROM custom_vectors WHERE id = ?",
+                (int(vector_id),),
+            ).fetchone()
+            if row is None:
+                return jsonify({"ok": False, "error": "Vector not found"}), 404
+            query_vec = np.frombuffer(row["embedding"], dtype=np.float32).copy()
+            exclude_ids: set = set()
+            if row["source_embed_ids"]:
+                exclude_ids = set(json.loads(row["source_embed_ids"]))
+
+        # Over-fetch to compensate for excluded source passages
+        fetch_k = top_k_int + len(exclude_ids)
+
+        try:
+            search_start = time.perf_counter()
+            search_metrics: Dict[str, Any]
+            if cfg.hnsw_enabled and hnswlib is not None:
+                state = app.config["HNSW_STATE"]
+
+                index_prepare_start = time.perf_counter()
+                file_sig = _file_signature(cfg.embedding_db_path)
+                index = state["index"]
+
+                if index is None or state["file_sig"] != file_sig:
+                    with state["lock"]:
+                        if state["index"] is None or state["file_sig"] != file_sig:
+                            loaded = _load_hnsw_index(
+                                index_path=cfg.hnsw_index_path,
+                                embedding_db_path=cfg.embedding_db_path,
+                                embeddings_table=cfg.embeddings_table,
+                                ef_search=cfg.hnsw_ef_search,
+                            )
+                            if loaded is not None:
+                                state["index"] = loaded
+                                state["file_sig"] = _file_signature(cfg.embedding_db_path)
+                            else:
+                                idx, fs = _build_hnsw_index(
+                                    embedding_db_path=cfg.embedding_db_path,
+                                    embeddings_table=cfg.embeddings_table,
+                                    m=cfg.hnsw_m,
+                                    ef_construction=cfg.hnsw_ef_construction,
+                                    ef_search=cfg.hnsw_ef_search,
+                                    log_every=cfg.hnsw_log_every,
+                                    index_path=cfg.hnsw_index_path,
+                                )
+                                state["index"] = idx
+                                state["file_sig"] = fs
+
+                index_prepare_ms = _timed_ms(index_prepare_start)
+
+                ann_start = time.perf_counter()
+                results = _search_embeddings_ann(
+                    embedding_db_path=cfg.embedding_db_path,
+                    embeddings_table=cfg.embeddings_table,
+                    query_vec=query_vec,
+                    top_k=fetch_k,
+                    include_context=include_context_bool,
+                    index=state["index"],
+                )
+                ann_ms = _timed_ms(ann_start)
+
+                search_ms = _timed_ms(search_start)
+                search_metrics = {
+                    "method": "hnsw",
+                    "index_prepare_ms": index_prepare_ms,
+                    "ann_query_ms": ann_ms,
+                    "total_ms": search_ms,
+                }
+            else:
+                results, search_metrics = _search_embeddings(
+                    embedding_db_path=cfg.embedding_db_path,
+                    embeddings_table=cfg.embeddings_table,
+                    query_vec=query_vec,
+                    top_k=fetch_k,
+                    include_context=include_context_bool,
+                )
+                search_ms = _timed_ms(search_start)
+                search_metrics = {"method": "brute_force", **search_metrics}
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 500
+
+        # Filter out source passages and trim to requested top_k
+        if exclude_ids:
+            results = [r for r in results if r["embed_id"] not in exclude_ids]
+        results = results[:top_k_int]
+
+        query_uuid = str(uuid.uuid4())
+        response_body = {"uuid": query_uuid, "results": results, "vector_id": int(vector_id)}
+
+        try:
+            persist_start = time.perf_counter()
+            _save_query(
+                queries_db_path=cfg.queries_db_path,
+                query_uuid=query_uuid,
+                request_body={"vector_id": int(vector_id), "top_k": top_k_int, "include_context": include_context_bool},
+                response_body=response_body,
+            )
+            persist_ms = _timed_ms(persist_start)
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"Failed to persist query: {e}"}), 500
+
+        perf_after = _sample_perf_snapshot()
+        wall_s = time.perf_counter() - req_start
+        perf_delta = _snapshot_delta(perf_before, perf_after)
+        perf_payload = {
+            "wall_ms": wall_s * 1000.0,
+            "wall_s": wall_s,
+            "timings_ms": {
+                "search_total_ms": search_ms,
+                "persist_ms": persist_ms,
+                "end_to_end_ms": wall_s * 1000.0,
+            },
+            "search_breakdown_ms": search_metrics,
+            "resource_delta": perf_delta,
+        }
+
+        if cfg.perf_log_enabled:
+            app.logger.info("vector_query_perf %s", json.dumps(perf_payload, sort_keys=True))
+
+        include_perf = cfg.perf_include_in_response or bool(body.get("debug_perf"))
+        if include_perf:
+            response_body["perf"] = perf_payload
+
+        return jsonify(response_body)
 
     return app
 
