@@ -796,7 +796,7 @@ def create_app() -> Flask:
         hnsw_ef_search=int(os.environ.get("HNSW_EF_SEARCH", "64")),
         hnsw_log_every=int(os.environ.get("HNSW_LOG_EVERY", "50000")),
         anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY"),
-        anthropic_model=os.environ.get("ANTHROPIC_MODEL", "claude-3-5-haiku-20241022"),
+        anthropic_model=os.environ.get("ANTHROPIC_MODEL", "claude-3-haiku-20240307"),
         anthropic_api_url=os.environ.get("ANTHROPIC_API_URL", "https://api.anthropic.com/v1/messages"),
         anthropic_api_version=os.environ.get("ANTHROPIC_API_VERSION", "2023-06-01"),
         anthropic_max_tokens=int(os.environ.get("ANTHROPIC_MAX_TOKENS", "512")),
