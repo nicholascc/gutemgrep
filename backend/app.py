@@ -2,6 +2,7 @@ import json
 import os
 import resource
 import sqlite3
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -12,6 +13,11 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import numpy as np
 import requests
 from flask import Flask, Response, jsonify, render_template, request, send_from_directory
+
+try:
+    import hnswlib  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    hnswlib = None
 
 
 @dataclass(frozen=True)
@@ -26,13 +32,13 @@ class AppConfig:
     static_dir: Optional[Path]
     perf_log_enabled: bool
     perf_include_in_response: bool
-
-
-def _env_bool(name: str, default: bool) -> bool:
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    return value.strip().lower() not in {"0", "false", "no", "off", ""}
+    hnsw_enabled: bool
+    hnsw_warm_build: bool
+    hnsw_index_path: Path
+    hnsw_m: int
+    hnsw_ef_construction: int
+    hnsw_ef_search: int
+    hnsw_log_every: int
 
 
 def _cpu_count() -> int:
@@ -134,6 +140,13 @@ def _env_path(name: str, default: Path, *, root: Path) -> Path:
     return path
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def _env_optional_path(name: str, *, root: Path) -> Optional[Path]:
     value = os.environ.get(name)
     if not value:
@@ -148,6 +161,58 @@ def _connect_sqlite(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _file_signature(path: Path) -> Tuple[int, int]:
+    stat = path.stat()
+    return int(stat.st_mtime_ns), int(stat.st_size)
+
+
+def _db_signature(*, db_path: Path, embeddings_table: str) -> Dict[str, Any]:
+    with _connect_sqlite(db_path) as conn:
+        if not _has_table(conn, embeddings_table):
+            raise RuntimeError(
+                f"Embedding DB missing table '{embeddings_table}'. Found: {_table_names(conn)}"
+            )
+        row = conn.execute(
+            f"SELECT length(embedding) AS blob_len FROM {embeddings_table} "
+            "WHERE embedding IS NOT NULL LIMIT 1"
+        ).fetchone()
+        if row is None or row["blob_len"] is None:
+            raise RuntimeError("No embeddings found to build HNSW index.")
+        blob_len = int(row["blob_len"])
+        if blob_len % 4 != 0:
+            raise RuntimeError(f"Unexpected embedding blob length: {blob_len}")
+        dim = blob_len // 4
+
+        count_row = conn.execute(
+            f"SELECT COUNT(*) AS n FROM {embeddings_table} WHERE embedding IS NOT NULL"
+        ).fetchone()
+        total = int(count_row["n"]) if count_row and count_row["n"] is not None else 0
+
+        data_version = conn.execute("PRAGMA data_version").fetchone()[0]
+        schema_version = conn.execute("PRAGMA schema_version").fetchone()[0]
+        page_count = conn.execute("PRAGMA page_count").fetchone()[0]
+        freelist_count = conn.execute("PRAGMA freelist_count").fetchone()[0]
+        user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+
+    mtime_ns, size = _file_signature(db_path)
+    return {
+        "mtime_ns": int(mtime_ns),
+        "size": int(size),
+        "data_version": int(data_version),
+        "schema_version": int(schema_version),
+        "page_count": int(page_count),
+        "freelist_count": int(freelist_count),
+        "user_version": int(user_version),
+        "embeddings_table": embeddings_table,
+        "row_count": int(total),
+        "dim": int(dim),
+    }
+
+
+def _sig_path(index_path: Path) -> Path:
+    return index_path.with_suffix(index_path.suffix + ".sig.json")
 
 
 def _table_names(conn: sqlite3.Connection) -> List[str]:
@@ -251,6 +316,175 @@ def _embedding_rows(
         FROM {table}
         """
     )
+
+
+def _build_hnsw_index(
+    *,
+    embedding_db_path: Path,
+    embeddings_table: str,
+    m: int,
+    ef_construction: int,
+    ef_search: int,
+    log_every: int,
+    index_path: Optional[Path],
+) -> Tuple["hnswlib.Index", Tuple[int, int]]:
+    if hnswlib is None:
+        raise RuntimeError("hnswlib is not installed; disable HNSW or add the dependency.")
+    signature = _db_signature(db_path=embedding_db_path, embeddings_table=embeddings_table)
+    dim = int(signature["dim"])
+    total = int(signature["row_count"])
+    if total <= 0:
+        raise RuntimeError("No embeddings found to build HNSW index.")
+
+    index = hnswlib.Index(space="cosine", dim=dim)
+    index.init_index(max_elements=total, ef_construction=ef_construction, M=m)
+
+    batch_ids: List[int] = []
+    batch_vecs: List[np.ndarray] = []
+    batch_size = 10000
+    processed = 0
+    log_every = max(int(log_every), 0)
+
+    with _connect_sqlite(embedding_db_path) as conn:
+        for row in conn.execute(
+            f"SELECT embed_id, embedding FROM {embeddings_table} WHERE embedding IS NOT NULL"
+        ):
+            blob = row["embedding"]
+            if blob is None:
+                continue
+            vec = np.frombuffer(blob, dtype=np.float32)
+            if vec.size != dim:
+                continue
+            batch_ids.append(int(row["embed_id"]))
+            batch_vecs.append(vec)
+            if len(batch_ids) >= batch_size:
+                index.add_items(np.vstack(batch_vecs), np.asarray(batch_ids, dtype=np.int64))
+                processed += len(batch_ids)
+                if log_every and processed % log_every == 0:
+                    print(f"[hnsw] indexed {processed}/{total} vectors")
+                batch_ids = []
+                batch_vecs = []
+
+    if batch_ids:
+        index.add_items(np.vstack(batch_vecs), np.asarray(batch_ids, dtype=np.int64))
+        processed += len(batch_ids)
+        if log_every:
+            print(f"[hnsw] indexed {processed}/{total} vectors")
+
+    index.set_ef(max(ef_search, 1))
+
+    if index_path is not None:
+        sig_path = _sig_path(index_path)
+        index.save_index(str(index_path))
+        sig_path.write_text(json.dumps(signature, indent=2), encoding="utf-8")
+
+    return index, _file_signature(embedding_db_path)
+
+
+def _load_hnsw_index(
+    *,
+    index_path: Path,
+    embedding_db_path: Path,
+    embeddings_table: str,
+    ef_search: int,
+) -> Optional["hnswlib.Index"]:
+    if hnswlib is None:
+        return None
+    sig_path = _sig_path(index_path)
+    if not index_path.exists() or not sig_path.exists():
+        return None
+    try:
+        on_disk_sig = json.loads(sig_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    current_sig = _db_signature(db_path=embedding_db_path, embeddings_table=embeddings_table)
+    if on_disk_sig != current_sig:
+        return None
+    index = hnswlib.Index(space="cosine", dim=int(current_sig["dim"]))
+    index.load_index(str(index_path))
+    index.set_ef(max(ef_search, 1))
+    return index
+
+
+def _search_embeddings_ann(
+    *,
+    embedding_db_path: Path,
+    embeddings_table: str,
+    query_vec: np.ndarray,
+    top_k: int,
+    include_context: bool,
+    index: "hnswlib.Index",
+) -> List[Dict[str, Any]]:
+    if query_vec.ndim != 1:
+        query_vec = query_vec.reshape(-1)
+    k = max(1, top_k)
+    labels, distances = index.knn_query(query_vec, k=k)
+    ids = [int(i) for i in labels[0].tolist() if int(i) >= 0]
+    if not ids:
+        return []
+    scores = [1.0 - float(d) for d in distances[0].tolist()]
+    score_by_id = {eid: score for eid, score in zip(ids, scores)}
+
+    with _connect_sqlite(embedding_db_path) as conn:
+        if not _has_table(conn, embeddings_table):
+            raise RuntimeError(
+                f"Embedding DB missing table '{embeddings_table}'. Found: {_table_names(conn)}"
+            )
+        placeholders = ",".join(["?"] * len(ids))
+        rows = conn.execute(
+            f"""
+            SELECT
+              embed_id,
+              paragraph_text,
+              prev_embed_id,
+              next_embed_id,
+              book_title,
+              book_id
+            FROM {embeddings_table}
+            WHERE embed_id IN ({placeholders})
+            """,
+            ids,
+        ).fetchall()
+        by_id: Dict[int, sqlite3.Row] = {int(r["embed_id"]): r for r in rows}
+
+        ordered: List[Dict[str, Any]] = []
+        for eid in ids:
+            row = by_id.get(eid)
+            if row is None:
+                continue
+            ordered.append(
+                {
+                    "embed_id": int(row["embed_id"]),
+                    "score": float(score_by_id.get(eid, float("-inf"))),
+                    "paragraph_text": str(row["paragraph_text"]),
+                    "prev_embed_id": int(row["prev_embed_id"]) if row["prev_embed_id"] is not None else None,
+                    "next_embed_id": int(row["next_embed_id"]) if row["next_embed_id"] is not None else None,
+                    "book_title": str(row["book_title"]) if row["book_title"] is not None else None,
+                    "book_id": int(row["book_id"]) if row["book_id"] is not None else None,
+                }
+            )
+
+        if not include_context:
+            for item in ordered:
+                item.pop("prev_embed_id", None)
+                item.pop("next_embed_id", None)
+            return ordered
+
+        neighbor_ids: List[int] = []
+        for item in ordered:
+            if item.get("prev_embed_id") is not None:
+                neighbor_ids.append(int(item["prev_embed_id"]))
+            if item.get("next_embed_id") is not None:
+                neighbor_ids.append(int(item["next_embed_id"]))
+        neighbor_text = _fetch_neighbor_texts(conn, table=embeddings_table, neighbor_ids=neighbor_ids)
+
+        for item in ordered:
+            prev_id = item.pop("prev_embed_id", None)
+            next_id = item.pop("next_embed_id", None)
+            item["prev_text"] = neighbor_text.get(prev_id) if prev_id is not None else None
+            item["next_text"] = neighbor_text.get(next_id) if next_id is not None else None
+
+        return ordered
 
 
 def _search_embeddings(
@@ -488,8 +722,14 @@ def _load_saved_query(
 
 def create_app() -> Flask:
     root = _repo_root()
+    embedding_db_path = _env_path("EMBEDDING_DB_PATH", root / "embedding.db", root=root)
+    default_hnsw_index_path = _env_path(
+        "HNSW_INDEX_PATH",
+        embedding_db_path.with_suffix(".hnsw"),
+        root=root,
+    )
     config = AppConfig(
-        embedding_db_path=_env_path("EMBEDDING_DB_PATH", root / "embedding.db", root=root),
+        embedding_db_path=embedding_db_path,
         queries_db_path=_env_path("QUERIES_DB_PATH", root / "queries.db", root=root),
         embeddings_table=os.environ.get("EMBEDDINGS_TABLE", "embeddings"),
         jina_api_key=os.environ.get("JINA_API_KEY"),
@@ -499,12 +739,57 @@ def create_app() -> Flask:
         static_dir=_env_optional_path("STATIC_DIR", root=root),
         perf_log_enabled=_env_bool("PERF_LOG", True),
         perf_include_in_response=_env_bool("PERF_INCLUDE_IN_RESPONSE", False),
+        hnsw_enabled=_env_bool("HNSW_ENABLED", True),
+        hnsw_warm_build=_env_bool("HNSW_WARM_BUILD", True),
+        hnsw_index_path=default_hnsw_index_path,
+        hnsw_m=int(os.environ.get("HNSW_M", "16")),
+        hnsw_ef_construction=int(os.environ.get("HNSW_EF_CONSTRUCTION", "200")),
+        hnsw_ef_search=int(os.environ.get("HNSW_EF_SEARCH", "64")),
+        hnsw_log_every=int(os.environ.get("HNSW_LOG_EVERY", "50000")),
     )
 
     # Disable Flask's built-in static route (/static/...) so our explicit
     # `/static/<path:filename>` handler can serve from `STATIC_DIR`.
     app = Flask(__name__, static_folder=None)
     app.config["APP_CONFIG"] = config
+    app.config["HNSW_STATE"] = {
+        "lock": threading.Lock(),
+        "index": None,
+        "file_sig": None,
+    }
+    if config.hnsw_enabled and config.hnsw_warm_build:
+        if hnswlib is None:
+            print("[hnsw] hnswlib not installed; skipping warm build")
+        else:
+            state = app.config["HNSW_STATE"]
+            with state["lock"]:
+                try:
+                    print("[hnsw] warm build start")
+                    loaded = _load_hnsw_index(
+                        index_path=config.hnsw_index_path,
+                        embedding_db_path=config.embedding_db_path,
+                        embeddings_table=config.embeddings_table,
+                        ef_search=config.hnsw_ef_search,
+                    )
+                    if loaded is not None:
+                        state["index"] = loaded
+                        state["file_sig"] = _file_signature(config.embedding_db_path)
+                        print("[hnsw] warm build loaded from disk")
+                    else:
+                        index, file_sig = _build_hnsw_index(
+                            embedding_db_path=config.embedding_db_path,
+                            embeddings_table=config.embeddings_table,
+                            m=config.hnsw_m,
+                            ef_construction=config.hnsw_ef_construction,
+                            ef_search=config.hnsw_ef_search,
+                            log_every=config.hnsw_log_every,
+                            index_path=config.hnsw_index_path,
+                        )
+                        state["index"] = index
+                        state["file_sig"] = file_sig
+                        print("[hnsw] warm build complete")
+                except Exception as exc:
+                    print(f"[hnsw] warm build failed: {exc}")
 
     @app.get("/health")
     def health() -> Response:
@@ -525,6 +810,9 @@ def create_app() -> Flask:
                 "perf_include_in_response": cfg.perf_include_in_response,
                 "mem_total_kb": meminfo.get("MemTotal"),
                 "mem_available_kb": meminfo.get("MemAvailable"),
+                "hnsw_enabled": cfg.hnsw_enabled,
+                "hnsw_warm_build": cfg.hnsw_warm_build,
+                "hnsw_index_path": str(cfg.hnsw_index_path),
             }
         )
 
@@ -547,6 +835,9 @@ def create_app() -> Flask:
                 "swap_total_kb": meminfo.get("SwapTotal"),
                 "swap_free_kb": meminfo.get("SwapFree"),
                 "process_snapshot": _sample_perf_snapshot(),
+                "hnsw_enabled": cfg.hnsw_enabled,
+                "hnsw_warm_build": cfg.hnsw_warm_build,
+                "hnsw_index_path": str(cfg.hnsw_index_path),
             }
         )
 
@@ -606,14 +897,78 @@ def create_app() -> Flask:
             embed_ms = _timed_ms(embed_start)
 
             search_start = time.perf_counter()
-            results, search_metrics = _search_embeddings(
-                embedding_db_path=cfg.embedding_db_path,
-                embeddings_table=cfg.embeddings_table,
-                query_vec=query_vec,
-                top_k=top_k_int,
-                include_context=include_context_bool,
-            )
-            search_ms = _timed_ms(search_start)
+            search_metrics: Dict[str, Any]
+            if cfg.hnsw_enabled and hnswlib is not None:
+                state = app.config["HNSW_STATE"]
+
+                index_prepare_start = time.perf_counter()
+                file_sig = _file_signature(cfg.embedding_db_path)
+                index = state["index"]
+                reloaded = False
+                loaded_from_disk = False
+                rebuilt = False
+
+                if index is None or state["file_sig"] != file_sig:
+                    with state["lock"]:
+                        if state["index"] is None or state["file_sig"] != file_sig:
+                            loaded = _load_hnsw_index(
+                                index_path=cfg.hnsw_index_path,
+                                embedding_db_path=cfg.embedding_db_path,
+                                embeddings_table=cfg.embeddings_table,
+                                ef_search=cfg.hnsw_ef_search,
+                            )
+                            if loaded is not None:
+                                index = loaded
+                                file_sig = _file_signature(cfg.embedding_db_path)
+                                loaded_from_disk = True
+                            else:
+                                index, file_sig = _build_hnsw_index(
+                                    embedding_db_path=cfg.embedding_db_path,
+                                    embeddings_table=cfg.embeddings_table,
+                                    m=cfg.hnsw_m,
+                                    ef_construction=cfg.hnsw_ef_construction,
+                                    ef_search=cfg.hnsw_ef_search,
+                                    log_every=cfg.hnsw_log_every,
+                                    index_path=cfg.hnsw_index_path,
+                                )
+                                rebuilt = True
+                            state["index"] = index
+                            state["file_sig"] = file_sig
+                            reloaded = True
+
+                index_prepare_ms = _timed_ms(index_prepare_start)
+
+                ann_start = time.perf_counter()
+                results = _search_embeddings_ann(
+                    embedding_db_path=cfg.embedding_db_path,
+                    embeddings_table=cfg.embeddings_table,
+                    query_vec=query_vec,
+                    top_k=top_k_int,
+                    include_context=include_context_bool,
+                    index=state["index"],
+                )
+                ann_ms = _timed_ms(ann_start)
+
+                search_ms = _timed_ms(search_start)
+                search_metrics = {
+                    "method": "hnsw",
+                    "index_prepare_ms": index_prepare_ms,
+                    "ann_query_ms": ann_ms,
+                    "reloaded": reloaded,
+                    "loaded_from_disk": loaded_from_disk,
+                    "rebuilt": rebuilt,
+                    "total_ms": search_ms,
+                }
+            else:
+                results, search_metrics = _search_embeddings(
+                    embedding_db_path=cfg.embedding_db_path,
+                    embeddings_table=cfg.embeddings_table,
+                    query_vec=query_vec,
+                    top_k=top_k_int,
+                    include_context=include_context_bool,
+                )
+                search_ms = _timed_ms(search_start)
+                search_metrics = {"method": "brute_force", **search_metrics}
         except Exception as e:
             return jsonify({"ok": False, "error": str(e)}), 500
 

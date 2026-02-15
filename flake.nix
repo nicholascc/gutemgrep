@@ -11,6 +11,7 @@
       let
         pkgs = import nixpkgs { inherit system; };
         python = pkgs.python3.withPackages (ps: [
+          ps.hnswlib
           ps.lxml
           ps.nltk
           ps.numpy

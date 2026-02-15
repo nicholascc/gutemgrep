@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "flask>=3.1.2",
+    "hnswlib>=0.8.0",
     "numpy>=2.4.2",
     "requests>=2.32.5",
 ]
