@@ -1,6 +1,8 @@
 import json
 import os
+import resource
 import sqlite3
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -22,6 +24,100 @@ class AppConfig:
     jina_embedding_task: str
     default_top_k: int
     static_dir: Optional[Path]
+    perf_log_enabled: bool
+    perf_include_in_response: bool
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+def _cpu_count() -> int:
+    return int(os.cpu_count() or 1)
+
+
+def _read_proc_ints(path: Path) -> Dict[str, int]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception:
+        return {}
+    out: Dict[str, int] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or ":" not in line:
+            continue
+        key, rest = line.split(":", 1)
+        value = rest.strip().split(" ", 1)[0]
+        try:
+            out[key] = int(value)
+        except ValueError:
+            continue
+    return out
+
+
+def _read_process_io() -> Dict[str, int]:
+    return _read_proc_ints(Path("/proc/self/io"))
+
+
+def _read_meminfo() -> Dict[str, int]:
+    return _read_proc_ints(Path("/proc/meminfo"))
+
+
+def _process_rss_kb() -> Optional[int]:
+    status = _read_proc_ints(Path("/proc/self/status"))
+    value = status.get("VmRSS")
+    return int(value) if value is not None else None
+
+
+def _sample_perf_snapshot() -> Dict[str, Any]:
+    ru = resource.getrusage(resource.RUSAGE_SELF)
+    proc_io = _read_process_io()
+    return {
+        "cpu_user_s": float(ru.ru_utime),
+        "cpu_system_s": float(ru.ru_stime),
+        "page_faults_major": int(ru.ru_majflt),
+        "page_faults_minor": int(ru.ru_minflt),
+        "ctx_switches_voluntary": int(ru.ru_nvcsw),
+        "ctx_switches_involuntary": int(ru.ru_nivcsw),
+        "rss_kb": _process_rss_kb(),
+        "proc_io_read_bytes": int(proc_io.get("read_bytes", 0)),
+        "proc_io_write_bytes": int(proc_io.get("write_bytes", 0)),
+        "proc_io_rchar_bytes": int(proc_io.get("rchar", 0)),
+        "proc_io_wchar_bytes": int(proc_io.get("wchar", 0)),
+    }
+
+
+def _snapshot_delta(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, Any]:
+    def _delta_int(name: str) -> int:
+        return int(after.get(name, 0)) - int(before.get(name, 0))
+
+    cpu_user = float(after.get("cpu_user_s", 0.0)) - float(before.get("cpu_user_s", 0.0))
+    cpu_system = float(after.get("cpu_system_s", 0.0)) - float(before.get("cpu_system_s", 0.0))
+    rss_before = before.get("rss_kb")
+    rss_after = after.get("rss_kb")
+    return {
+        "cpu_user_s": cpu_user,
+        "cpu_system_s": cpu_system,
+        "cpu_total_s": cpu_user + cpu_system,
+        "page_faults_major": _delta_int("page_faults_major"),
+        "page_faults_minor": _delta_int("page_faults_minor"),
+        "ctx_switches_voluntary": _delta_int("ctx_switches_voluntary"),
+        "ctx_switches_involuntary": _delta_int("ctx_switches_involuntary"),
+        "rss_kb_delta": (int(rss_after) - int(rss_before))
+        if rss_before is not None and rss_after is not None
+        else None,
+        "proc_io_read_bytes": _delta_int("proc_io_read_bytes"),
+        "proc_io_write_bytes": _delta_int("proc_io_write_bytes"),
+        "proc_io_rchar_bytes": _delta_int("proc_io_rchar_bytes"),
+        "proc_io_wchar_bytes": _delta_int("proc_io_wchar_bytes"),
+    }
+
+
+def _timed_ms(start: float) -> float:
+    return (time.perf_counter() - start) * 1000.0
 
 
 def _repo_root() -> Path:
@@ -164,18 +260,26 @@ def _search_embeddings(
     query_vec: np.ndarray,
     top_k: int,
     include_context: bool,
-) -> List[Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    total_start = time.perf_counter()
     with _connect_sqlite(embedding_db_path) as conn:
+        validate_start = time.perf_counter()
         if not _has_table(conn, embeddings_table):
             raise RuntimeError(
                 f"Embedding DB missing table '{embeddings_table}'. Found: {_table_names(conn)}"
             )
+        validate_ms = _timed_ms(validate_start)
 
+        scan_start = time.perf_counter()
         scored: List[Tuple[float, Dict[str, Any]]] = []
+        rows_scanned = 0
+        embedding_blob_bytes = 0
         for row in _embedding_rows(conn, table=embeddings_table):
+            rows_scanned += 1
             blob = row["embedding"]
             if blob is None:
                 continue
+            embedding_blob_bytes += len(blob)
             vec = np.frombuffer(blob, dtype=np.float32)
             if vec.size == 0:
                 continue
@@ -194,16 +298,31 @@ def _search_embeddings(
                     },
                 )
             )
+        scan_ms = _timed_ms(scan_start)
 
+        sort_start = time.perf_counter()
         scored.sort(key=lambda x: x[0], reverse=True)
         top = [item for _, item in scored[: max(1, top_k)]]
+        sort_ms = _timed_ms(sort_start)
 
         if not include_context:
             for item in top:
                 item.pop("prev_embed_id", None)
                 item.pop("next_embed_id", None)
-            return top
+            return (
+                top,
+                {
+                    "rows_scanned": rows_scanned,
+                    "embedding_blob_bytes_scanned": embedding_blob_bytes,
+                    "db_validate_ms": validate_ms,
+                    "scan_and_score_ms": scan_ms,
+                    "sort_ms": sort_ms,
+                    "context_fetch_ms": 0.0,
+                    "total_ms": _timed_ms(total_start),
+                },
+            )
 
+        context_start = time.perf_counter()
         neighbor_ids: List[int] = []
         for item in top:
             if item.get("prev_embed_id") is not None:
@@ -218,7 +337,18 @@ def _search_embeddings(
             item["prev_text"] = neighbor_text.get(prev_id) if prev_id is not None else None
             item["next_text"] = neighbor_text.get(next_id) if next_id is not None else None
 
-        return top
+        return (
+            top,
+            {
+                "rows_scanned": rows_scanned,
+                "embedding_blob_bytes_scanned": embedding_blob_bytes,
+                "db_validate_ms": validate_ms,
+                "scan_and_score_ms": scan_ms,
+                "sort_ms": sort_ms,
+                "context_fetch_ms": _timed_ms(context_start),
+                "total_ms": _timed_ms(total_start),
+            },
+        )
 
 
 def _save_query(
@@ -367,6 +497,8 @@ def create_app() -> Flask:
         jina_embedding_task=os.environ.get("JINA_EMBED_TASK", "text-matching"),
         default_top_k=int(os.environ.get("DEFAULT_TOP_K", "10")),
         static_dir=_env_optional_path("STATIC_DIR", root=root),
+        perf_log_enabled=_env_bool("PERF_LOG", True),
+        perf_include_in_response=_env_bool("PERF_INCLUDE_IN_RESPONSE", False),
     )
 
     # Disable Flask's built-in static route (/static/...) so our explicit
@@ -377,6 +509,7 @@ def create_app() -> Flask:
     @app.get("/health")
     def health() -> Response:
         cfg: AppConfig = app.config["APP_CONFIG"]
+        meminfo = _read_meminfo()
         return jsonify(
             {
                 "ok": True,
@@ -387,6 +520,33 @@ def create_app() -> Flask:
                 "jina_embedding_model": cfg.jina_embedding_model,
                 "jina_embedding_task": cfg.jina_embedding_task,
                 "has_jina_api_key": bool(cfg.jina_api_key),
+                "cpu_count": _cpu_count(),
+                "perf_log_enabled": cfg.perf_log_enabled,
+                "perf_include_in_response": cfg.perf_include_in_response,
+                "mem_total_kb": meminfo.get("MemTotal"),
+                "mem_available_kb": meminfo.get("MemAvailable"),
+            }
+        )
+
+    @app.get("/debug/system")
+    def debug_system() -> Response:
+        meminfo = _read_meminfo()
+        loadavg: Optional[Tuple[float, float, float]]
+        try:
+            load = os.getloadavg()
+            loadavg = (float(load[0]), float(load[1]), float(load[2]))
+        except Exception:
+            loadavg = None
+        return jsonify(
+            {
+                "ok": True,
+                "cpu_count": _cpu_count(),
+                "loadavg_1m_5m_15m": loadavg,
+                "mem_total_kb": meminfo.get("MemTotal"),
+                "mem_available_kb": meminfo.get("MemAvailable"),
+                "swap_total_kb": meminfo.get("SwapTotal"),
+                "swap_free_kb": meminfo.get("SwapFree"),
+                "process_snapshot": _sample_perf_snapshot(),
             }
         )
 
@@ -414,6 +574,8 @@ def create_app() -> Flask:
 
     @app.post("/query")
     def query() -> Response:
+        req_start = time.perf_counter()
+        perf_before = _sample_perf_snapshot()
         cfg: AppConfig = app.config["APP_CONFIG"]
         body = request.get_json(silent=True) or {}
         query_text = body.get("query") or body.get("text") or ""
@@ -434,33 +596,68 @@ def create_app() -> Flask:
             return jsonify({"ok": False, "error": "JINA_API_KEY not set"}), 500
 
         try:
+            embed_start = time.perf_counter()
             query_vec = _jina_embed_text(
                 api_key=cfg.jina_api_key,
                 model=cfg.jina_embedding_model,
                 task=cfg.jina_embedding_task,
                 text=query_text,
             )
-            results = _search_embeddings(
+            embed_ms = _timed_ms(embed_start)
+
+            search_start = time.perf_counter()
+            results, search_metrics = _search_embeddings(
                 embedding_db_path=cfg.embedding_db_path,
                 embeddings_table=cfg.embeddings_table,
                 query_vec=query_vec,
                 top_k=top_k_int,
                 include_context=include_context_bool,
             )
+            search_ms = _timed_ms(search_start)
         except Exception as e:
             return jsonify({"ok": False, "error": str(e)}), 500
 
         query_uuid = str(uuid.uuid4())
         response_body = {"uuid": query_uuid, "results": results}
         try:
+            persist_start = time.perf_counter()
             _save_query(
                 queries_db_path=cfg.queries_db_path,
                 query_uuid=query_uuid,
                 request_body={"query": query_text, "top_k": top_k_int, "include_context": include_context_bool},
                 response_body=response_body,
             )
+            persist_ms = _timed_ms(persist_start)
         except Exception as e:
             return jsonify({"ok": False, "error": f"Failed to persist query: {e}"}), 500
+
+        perf_after = _sample_perf_snapshot()
+        wall_s = time.perf_counter() - req_start
+        perf_delta = _snapshot_delta(perf_before, perf_after)
+        perf_payload = {
+            "wall_ms": wall_s * 1000.0,
+            "wall_s": wall_s,
+            "cpu_utilization_pct_single_core_estimate": (
+                (perf_delta["cpu_total_s"] / wall_s) * 100.0 if wall_s > 0 else None
+            ),
+            "cpu_count": _cpu_count(),
+            "timings_ms": {
+                "embed_request_ms": embed_ms,
+                "search_total_ms": search_ms,
+                "persist_ms": persist_ms,
+                "end_to_end_ms": wall_s * 1000.0,
+            },
+            "search_breakdown_ms": search_metrics,
+            "resource_delta": perf_delta,
+            "resource_after": perf_after,
+        }
+
+        if cfg.perf_log_enabled:
+            app.logger.info("query_perf %s", json.dumps(perf_payload, sort_keys=True))
+
+        include_perf = cfg.perf_include_in_response or bool(body.get("debug_perf"))
+        if include_perf:
+            response_body["perf"] = perf_payload
 
         return jsonify(response_body)
 
