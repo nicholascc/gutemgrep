@@ -41,6 +41,21 @@ class AppConfig:
     hnsw_log_every: int
 
 
+def _require_book_metadata(conn: sqlite3.Connection) -> None:
+    if not _has_table(conn, "book_metadata"):
+        raise RuntimeError(
+            "Missing book_metadata table; run tools/add_embedding_db_metadata.py to populate it."
+        )
+
+
+def _book_filter_sql(alias: str = "bm") -> str:
+    return (
+        f"{alias}.language IS NOT NULL "
+        f"AND (lower({alias}.language) = 'en' OR lower({alias}.language) LIKE \"%'en'%\") "
+        f"AND ({alias}.book_title IS NULL OR lower({alias}.book_title) NOT LIKE '%dictionary%')"
+    )
+
+
 def _cpu_count() -> int:
     return int(os.cpu_count() or 1)
 
@@ -174,6 +189,7 @@ def _db_signature(*, db_path: Path, embeddings_table: str) -> Dict[str, Any]:
             raise RuntimeError(
                 f"Embedding DB missing table '{embeddings_table}'. Found: {_table_names(conn)}"
             )
+        _require_book_metadata(conn)
         row = conn.execute(
             f"SELECT length(embedding) AS blob_len FROM {embeddings_table} "
             "WHERE embedding IS NOT NULL LIMIT 1"
@@ -186,7 +202,12 @@ def _db_signature(*, db_path: Path, embeddings_table: str) -> Dict[str, Any]:
         dim = blob_len // 4
 
         count_row = conn.execute(
-            f"SELECT COUNT(*) AS n FROM {embeddings_table} WHERE embedding IS NOT NULL"
+            f"""
+            SELECT COUNT(*) AS n
+            FROM {embeddings_table} AS e
+            JOIN book_metadata AS bm ON e.book_id = bm.book_id
+            WHERE e.embedding IS NOT NULL AND {_book_filter_sql('bm')}
+            """
         ).fetchone()
         total = int(count_row["n"]) if count_row and count_row["n"] is not None else 0
 
@@ -303,17 +324,20 @@ def _fetch_neighbor_texts(
 def _embedding_rows(
     conn: sqlite3.Connection, *, table: str
 ) -> Iterable[sqlite3.Row]:
+    _require_book_metadata(conn)
     return conn.execute(
         f"""
         SELECT
-          embed_id,
-          paragraph_text,
-          prev_embed_id,
-          next_embed_id,
-          embedding,
-          book_title,
-          book_id
-        FROM {table}
+          e.embed_id,
+          e.paragraph_text,
+          e.prev_embed_id,
+          e.next_embed_id,
+          e.embedding,
+          e.book_title,
+          e.book_id
+        FROM {table} AS e
+        JOIN book_metadata AS bm ON e.book_id = bm.book_id
+        WHERE e.embedding IS NOT NULL AND {_book_filter_sql('bm')}
         """
     )
 
@@ -346,8 +370,26 @@ def _build_hnsw_index(
     log_every = max(int(log_every), 0)
 
     with _connect_sqlite(embedding_db_path) as conn:
+        _require_book_metadata(conn)
+        total_row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS n
+            FROM {embeddings_table} AS e
+            JOIN book_metadata AS bm ON e.book_id = bm.book_id
+            WHERE e.embedding IS NOT NULL AND {_book_filter_sql('bm')}
+            """
+        ).fetchone()
+        total = int(total_row["n"]) if total_row and total_row["n"] is not None else 0
+        if total <= 0:
+            raise RuntimeError("No embeddings found to build HNSW index (after filtering).")
+
         for row in conn.execute(
-            f"SELECT embed_id, embedding FROM {embeddings_table} WHERE embedding IS NOT NULL"
+            f"""
+            SELECT e.embed_id, e.embedding
+            FROM {embeddings_table} AS e
+            JOIN book_metadata AS bm ON e.book_id = bm.book_id
+            WHERE e.embedding IS NOT NULL AND {_book_filter_sql('bm')}
+            """
         ):
             blob = row["embedding"]
             if blob is None:
@@ -430,6 +472,7 @@ def _search_embeddings_ann(
             raise RuntimeError(
                 f"Embedding DB missing table '{embeddings_table}'. Found: {_table_names(conn)}"
             )
+        _require_book_metadata(conn)
         placeholders = ",".join(["?"] * len(ids))
         rows = conn.execute(
             f"""
@@ -502,6 +545,7 @@ def _search_embeddings(
             raise RuntimeError(
                 f"Embedding DB missing table '{embeddings_table}'. Found: {_table_names(conn)}"
             )
+        _require_book_metadata(conn)
         validate_ms = _timed_ms(validate_start)
 
         scan_start = time.perf_counter()
