@@ -39,6 +39,11 @@ class AppConfig:
     hnsw_ef_construction: int
     hnsw_ef_search: int
     hnsw_log_every: int
+    anthropic_api_key: Optional[str]
+    anthropic_model: str
+    anthropic_api_url: str
+    anthropic_api_version: str
+    anthropic_max_tokens: int
 
 
 def _require_book_metadata(conn: sqlite3.Connection) -> None:
@@ -790,6 +795,11 @@ def create_app() -> Flask:
         hnsw_ef_construction=int(os.environ.get("HNSW_EF_CONSTRUCTION", "200")),
         hnsw_ef_search=int(os.environ.get("HNSW_EF_SEARCH", "64")),
         hnsw_log_every=int(os.environ.get("HNSW_LOG_EVERY", "50000")),
+        anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY"),
+        anthropic_model=os.environ.get("ANTHROPIC_MODEL", "claude-3-haiku-20240307"),
+        anthropic_api_url=os.environ.get("ANTHROPIC_API_URL", "https://api.anthropic.com/v1/messages"),
+        anthropic_api_version=os.environ.get("ANTHROPIC_API_VERSION", "2023-06-01"),
+        anthropic_max_tokens=int(os.environ.get("ANTHROPIC_MAX_TOKENS", "512")),
     )
 
     # Disable Flask's built-in static route (/static/...) so our explicit
@@ -857,6 +867,7 @@ def create_app() -> Flask:
                 "hnsw_enabled": cfg.hnsw_enabled,
                 "hnsw_warm_build": cfg.hnsw_warm_build,
                 "hnsw_index_path": str(cfg.hnsw_index_path),
+                "anthropic_model": cfg.anthropic_model,
             }
         )
 
@@ -1059,6 +1070,57 @@ def create_app() -> Flask:
             response_body["perf"] = perf_payload
 
         return jsonify(response_body)
+
+    @app.post("/haiku")
+    def haiku() -> Response:
+        cfg: AppConfig = app.config["APP_CONFIG"]
+        if not cfg.anthropic_api_key:
+            return jsonify({"ok": False, "error": "ANTHROPIC_API_KEY not set"}), 500
+
+        body = request.get_json(silent=True) or {}
+        prompt = body.get("prompt") or body.get("text") or body.get("query") or ""
+        if not isinstance(prompt, str) or not prompt.strip():
+            return jsonify({"ok": False, "error": "Missing non-empty 'prompt'"}), 400
+
+        model = body.get("model") or cfg.anthropic_model
+        max_tokens = body.get("max_tokens") or cfg.anthropic_max_tokens
+        temperature = body.get("temperature", None)
+
+        payload: Dict[str, Any] = {
+            "model": model,
+            "max_tokens": int(max_tokens),
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if temperature is not None:
+            payload["temperature"] = float(temperature)
+
+        resp = requests.post(
+            cfg.anthropic_api_url,
+            headers={
+                "x-api-key": cfg.anthropic_api_key,
+                "anthropic-version": cfg.anthropic_api_version,
+                "content-type": "application/json",
+            },
+            json=payload,
+            timeout=60,
+        )
+        if resp.status_code >= 400:
+            return jsonify({"ok": False, "error": resp.text}), resp.status_code
+
+        data = resp.json()
+        text_out = ""
+        for item in data.get("content") or []:
+            if isinstance(item, dict) and item.get("type") == "text":
+                text_out += str(item.get("text") or "")
+
+        return jsonify(
+            {
+                "ok": True,
+                "model": data.get("model") or model,
+                "text": text_out,
+                "raw": data,
+            }
+        )
 
     @app.get("/book/by-embed/<int:embed_id>")
     def book_by_embed(embed_id: int) -> Response:
