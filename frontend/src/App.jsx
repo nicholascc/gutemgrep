@@ -662,9 +662,9 @@ function AlterButton({ text, onAltered, size = "normal" }) {
   );
 }
 
-// ─── Sidebar Search Button ──────────────────────────────────────────────────
+// ─── Sidebar Action Button ──────────────────────────────────────────────────
 
-function SidebarSearchButton({ onClick }) {
+function SidebarActionButton({ label, onClick }) {
   const [hovered, setHovered] = useState(false);
   return (
     <button
@@ -679,14 +679,18 @@ function SidebarSearchButton({ onClick }) {
         transition: "color 0.3s ease", whiteSpace: "nowrap",
       }}
     >
-      search
+      {label}
     </button>
   );
 }
 
+function SidebarSearchButton({ onClick }) {
+  return <SidebarActionButton label="search" onClick={onClick} />;
+}
+
 // ─── Collection Sidebar (LEFT) ──────────────────────────────────────────────
 
-function CollectionSidebar({ items, open, onClose, onRemove, selected, onToggleSelect, onCreateVector, customTexts, selectedCustomIndices, onToggleCustomSelect, onAddCustomText, onRemoveCustomText, onAlter, onSearchByText }) {
+function CollectionSidebar({ items, open, onClose, onRemove, selected, onToggleSelect, onCreateVector, customTexts, selectedCustomIndices, onToggleCustomSelect, onAddCustomText, onRemoveCustomText, onAlter, onSearchByText, onOpenBook }) {
   const [newText, setNewText] = useState("");
   const [vectorName, setVectorName] = useState("");
   const [showNaming, setShowNaming] = useState(false);
@@ -750,11 +754,12 @@ function CollectionSidebar({ items, open, onClose, onRemove, selected, onToggleS
                     <p style={{ fontFamily: FONT, fontSize: 13.5, lineHeight: 1.6, color: DIM(isSelected ? 0.85 : 0.65), margin: "0 0 4px 0", transition: "color 0.2s ease" }}>
                       {renderFormatted(item.paragraph_text.length > 100 ? item.paragraph_text.slice(0, 100) + "\u2026" : item.paragraph_text)}
                     </p>
-                    <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                    <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
                       <span style={{ fontFamily: FONT, fontStyle: "italic", fontSize: 11.5, color: WARM(0.3) }}>{renderFormatted(item.book_title)}</span>
                       <span style={{ color: WARM(0.1) }}>{"\u00b7"}</span>
-                      <AlterButton text={item.paragraph_text} onAltered={onAlter} size="small" />
                       <SidebarSearchButton onClick={() => onSearchByText(item.paragraph_text)} />
+                      <SidebarActionButton label="read" onClick={() => onOpenBook(item)} />
+                      <AlterButton text={item.paragraph_text} onAltered={onAlter} size="small" />
                     </div>
                   </div>
                   <button
@@ -1475,6 +1480,7 @@ export default function GutemGrep() {
         onRemoveCustomText={handleRemoveCustomText}
         onAlter={handleAddCustomText}
         onSearchByText={(text) => { setCollectionOpen(false); doSearch(text); }}
+        onOpenBook={(item) => { setCollectionOpen(false); doExpand({ embed_id: item.embed_id, paragraph_text: item.paragraph_text, book_title: item.book_title, book_id: item.book_id, score: 0 }, null); }}
       />
       {!collectionOpen && <CollectionTab count={collection.length} onClick={() => setCollectionOpen(true)} />}
 
