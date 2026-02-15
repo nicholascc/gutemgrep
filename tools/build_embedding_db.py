@@ -247,10 +247,11 @@ def _is_notable(author: str, notable: set[str], single_tokens: set[str]) -> bool
 
 def _load_metadata(
     metadata_csv: Path, *, notable: set[str], single_tokens: set[str]
-) -> tuple[dict[int, str], dict[int, int], set[int]]:
+) -> tuple[dict[int, str], dict[int, str], dict[int, int], set[int]]:
     if not metadata_csv.exists():
-        return {}, {}, set()
+        return {}, {}, {}, set()
     by_book_id: dict[int, str] = {}
+    authors_by_id: dict[int, str] = {}
     downloads_by_id: dict[int, int] = {}
     notable_book_ids: set[int] = set()
     with metadata_csv.open("r", encoding="utf-8", newline="") as f:
@@ -273,9 +274,11 @@ def _load_metadata(
                 except Exception:
                     continue
             author = (row.get("author") or "").strip()
+            if author:
+                authors_by_id[book_id] = author
             if author and _is_notable(author, notable, single_tokens):
                 notable_book_ids.add(book_id)
-    return by_book_id, downloads_by_id, notable_book_ids
+    return by_book_id, authors_by_id, downloads_by_id, notable_book_ids
 
 
 def _embed_batch(*, api_key: str, model: str, task: str, texts: list[str]) -> tuple[list[np.ndarray], int]:
@@ -488,10 +491,12 @@ def main() -> None:
         raise SystemExit(f"Missing text dir: {text_dir}")
 
     authors_list_path = (root / args.authors_list).resolve()
-    if not authors_list_path.exists():
-        raise SystemExit(f"Missing authors list: {authors_list_path}")
-    notable, single_tokens = _load_notable_names(authors_list_path)
-    titles, downloads_by_id, notable_book_ids = _load_metadata(
+    if authors_list_path.exists():
+        notable, single_tokens = _load_notable_names(authors_list_path)
+    else:
+        print(f"Warning: missing authors list: {authors_list_path} (continuing without notables)", flush=True)
+        notable, single_tokens = set(), set()
+    titles, authors_by_id, downloads_by_id, notable_book_ids = _load_metadata(
         metadata_csv, notable=notable, single_tokens=single_tokens
     )
 
@@ -549,6 +554,7 @@ def main() -> None:
         last_rate_time = start_time
         last_rate_books_done = 0
         rate_s_per_book: float | None = None
+        last_status_len = 0
         total_tokens = 0
         total_embed_s = 0.0
         total_insert_s = 0.0
@@ -600,20 +606,33 @@ def main() -> None:
                 return ""
             return f" ({rate_s_per_book:.1f}s/book)"
 
+        def _status_line(*, now: float) -> str:
+            elapsed_s = now - start_time
+            skipped_part = f" (skipped {books_skipped})" if books_skipped else ""
+            rate_part = _format_rate()
+            return (
+                f"{elapsed_s:7.1f}s | Books {books_done}/{total_books}{skipped_part}{rate_part} | "
+                f"Embedded {inserted} chunks | Tokens {total_tokens}"
+            )
+
+        def _clear_status_line() -> None:
+            nonlocal last_status_len
+            if last_status_len <= 0:
+                return
+            print("\r" + (" " * last_status_len) + "\r", end="", flush=True)
+            last_status_len = 0
+
         def _print_progress(*, force: bool = False) -> None:
-            nonlocal last_progress_print_time
+            nonlocal last_progress_print_time, last_status_len
             now = time.monotonic()
             if not force and (now - last_progress_print_time) < 0.5:
                 return
             last_progress_print_time = now
 
-            elapsed_s = now - start_time
-            skipped_part = f" (skipped {books_skipped})" if books_skipped else ""
-            rate_part = _format_rate()
-            print(
-                f"{elapsed_s:7.1f}s | Books {books_done}/{total_books}{skipped_part}{rate_part} | Embedded {inserted} chunks | Tokens {total_tokens}",
-                end="\r",
-            )
+            line = _status_line(now=now)
+            pad = max(0, last_status_len - len(line))
+            print("\r" + line + (" " * pad), end="", flush=True)
+            last_status_len = len(line)
 
         def insert_one_payload(res: EmbedResult) -> None:
             nonlocal inserted, total_tokens, total_embed_s, total_insert_s, total_batches
@@ -674,6 +693,7 @@ def main() -> None:
                         continue
 
                 title = titles.get(book_id)
+                author = authors_by_id.get(book_id)
 
                 if resume and not args.overwrite:
                     # If we previously crashed mid-book, remove any partial rows for this book
@@ -746,6 +766,18 @@ def main() -> None:
                 if checkpoint_frequency and (books_done % checkpoint_frequency == 0):
                     conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
+                if author and title:
+                    _clear_status_line()
+                    print(f"{author} — {title}", flush=True)
+                elif title:
+                    _clear_status_line()
+                    print(title, flush=True)
+                elif author:
+                    _clear_status_line()
+                    print(author, flush=True)
+                else:
+                    _clear_status_line()
+                    print(f"PG{int(book_id)}", flush=True)
                 _print_progress(force=True)
 
                 if max_paragraphs and seen >= max_paragraphs:
@@ -759,6 +791,7 @@ def main() -> None:
         if total_rows_int == 0:
             raise SystemExit(f"No chunks found in {text_dir}.")
 
+    # Ensure the final progress line doesn't get overwritten.
     print()
     print(
         f"OK: added {inserted} chunks; db has {total_rows_int} rows at {out_db} (table: {args.table}, model: {args.model}, task: {args.task})"
