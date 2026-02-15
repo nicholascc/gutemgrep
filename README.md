@@ -65,6 +65,10 @@ Notes:
 - `queries.db` is created automatically on first query.
 - You need a populated `embedding.db` table (default `embeddings`) for search to return results.
 
+## Scripts
+
+- `scripts/add_notable_author.py`: add a `notable_author` column to Gutenberg `metadata.csv` using a list of notable authors (see `scripts/README.md` for usage).
+
 ---
 
 ## Building `embedding.db` (Dev)

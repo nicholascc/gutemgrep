@@ -8,6 +8,7 @@ import re
 import sqlite3
 import threading
 import time
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator, Optional
@@ -16,6 +17,36 @@ import numpy as np
 import requests
 
 _TOKEN_RE = re.compile(r"\S+")
+IGNORE_PAREN_WORDS = {
+    "omit",
+    "english",
+    "corpus",
+    "translations",
+    "translation",
+    "strictly",
+    "original",
+    "pre",
+    "post",
+    "work",
+    "limited",
+    "include",
+    "included",
+    "flag",
+    "via",
+    "want",
+    "only",
+    "if",
+    "you",
+    "for",
+    "in",
+    "the",
+    "a",
+    "an",
+    "is",
+    "are",
+    "to",
+}
+SUFFIX_TOKENS = {"jr", "sr", "iii", "iv", "ii"}
 
 
 @dataclass(frozen=True)
@@ -111,10 +142,118 @@ def _iter_paragraphs_from_file(path: Path, *, min_tokens: int, min_chars: int) -
         yield prev_chunk
 
 
-def _load_book_meta(metadata_csv: Path) -> dict[int, tuple[Optional[str], Optional[str]]]:
+def _strip_diacritics(text: str) -> str:
+    return "".join(
+        ch for ch in unicodedata.normalize("NFKD", text) if not unicodedata.combining(ch)
+    )
+
+
+def _normalize(text: str) -> str:
+    text = _strip_diacritics(text)
+    text = (
+        text.replace("’", "'")
+        .replace("‘", "'")
+        .replace("“", '"')
+        .replace("”", '"')
+    )
+    text = text.lower()
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _normalize_variants(text: str) -> set[str]:
+    norm = _normalize(text)
+    variants = {norm} if norm else set()
+    tokens = norm.split()
+    if tokens and tokens[-1] in SUFFIX_TOKENS:
+        trimmed = " ".join(tokens[:-1])
+        if trimmed:
+            variants.add(trimmed)
+    return variants
+
+
+def _maybe_alias_from_paren(paren: str) -> str | None:
+    candidate = re.split(r"[;]", paren, maxsplit=1)[0].strip()
+    if not candidate:
+        return None
+    tokens = set(_normalize(candidate).split())
+    if tokens & IGNORE_PAREN_WORDS:
+        return None
+    return candidate
+
+
+def _load_notable_names(path: Path) -> tuple[set[str], set[str]]:
+    notable = set()
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        m = re.match(r"^(.*?)\s*\((.*?)\)\s*$", line)
+        if m:
+            base = m.group(1).strip()
+            paren = m.group(2).strip()
+            if base:
+                notable.update(_normalize_variants(base))
+            alias = _maybe_alias_from_paren(paren)
+            if alias:
+                notable.update(_normalize_variants(alias))
+        else:
+            notable.update(_normalize_variants(line))
+    single_tokens = {name for name in notable if " " not in name}
+    return notable, single_tokens
+
+
+def _author_variants(author: str) -> set[str]:
+    if not author:
+        return set()
+    variants = set()
+    variants.update(_normalize_variants(author))
+    if "," in author:
+        parts = [p.strip() for p in author.split(",", 1)]
+        if len(parts) == 2:
+            last, rest = parts[0], parts[1]
+            if rest:
+                reordered = f"{rest} {last}".strip()
+                variants.update(_normalize_variants(reordered))
+    return variants
+
+
+def _split_authors(author: str) -> list[str]:
+    # Keep conservative splitting to avoid breaking institutional names.
+    if ";" in author:
+        return [a.strip() for a in author.split(";") if a.strip()]
+    if "|" in author:
+        return [a.strip() for a in author.split("|") if a.strip()]
+    return [author]
+
+
+def _is_notable(author: str, notable: set[str], single_tokens: set[str]) -> bool:
+    for part in _split_authors(author):
+        variants = _author_variants(part)
+        if any(v in notable for v in variants):
+            return True
+        for v in variants:
+            tokens = v.split()
+            if not tokens:
+                continue
+            last = tokens[-1]
+            if last in single_tokens:
+                return True
+            if v in single_tokens:
+                return True
+    return False
+
+
+def _load_metadata(
+    metadata_csv: Path, *, notable: set[str], single_tokens: set[str]
+) -> tuple[dict[int, str], dict[int, str], dict[int, int], set[int]]:
     if not metadata_csv.exists():
-        return {}
-    by_book_id: dict[int, tuple[Optional[str], Optional[str]]] = {}
+        return {}, {}, {}, set()
+    by_book_id: dict[int, str] = {}
+    authors_by_id: dict[int, str] = {}
+    downloads_by_id: dict[int, int] = {}
+    notable_book_ids: set[int] = set()
     with metadata_csv.open("r", encoding="utf-8", newline="") as f:
         r = csv.DictReader(f)
         for row in r:
@@ -125,11 +264,21 @@ def _load_book_meta(metadata_csv: Path) -> dict[int, tuple[Optional[str], Option
                 book_id = int(raw_id[2:])
             except Exception:
                 continue
-            title = (row.get("title") or "").strip() or None
-            author = (row.get("author") or "").strip() or None
-            if title or author:
-                by_book_id[book_id] = (title, author)
-    return by_book_id
+            title = (row.get("title") or "").strip()
+            if title:
+                by_book_id[book_id] = title
+            downloads_raw = (row.get("downloads") or "").strip()
+            if downloads_raw:
+                try:
+                    downloads_by_id[book_id] = int(float(downloads_raw))
+                except Exception:
+                    continue
+            author = (row.get("author") or "").strip()
+            if author:
+                authors_by_id[book_id] = author
+            if author and _is_notable(author, notable, single_tokens):
+                notable_book_ids.add(book_id)
+    return by_book_id, authors_by_id, downloads_by_id, notable_book_ids
 
 
 def _embed_batch(*, api_key: str, model: str, task: str, texts: list[str]) -> tuple[list[np.ndarray], int]:
@@ -286,6 +435,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Build embedding.db from Gutenberg text/ files (Jina embeddings API).")
     parser.add_argument("--text-dir", default="gutenberg/data/text", help="Directory of PG*_text.txt files.")
     parser.add_argument("--metadata-csv", default="gutenberg/metadata/metadata.csv", help="Metadata CSV with titles.")
+    parser.add_argument("--authors-list", default="authors_list_2.txt", help="Notable authors list.")
     parser.add_argument("--out-db", default="embedding.db", help="Output SQLite path.")
     parser.add_argument("--table", default=os.environ.get("EMBEDDINGS_TABLE", "embeddings"))
     parser.add_argument("--model", default=os.environ.get("JINA_EMBED_MODEL", "jina-embeddings-v3"))
@@ -340,7 +490,15 @@ def main() -> None:
     if not text_dir.exists():
         raise SystemExit(f"Missing text dir: {text_dir}")
 
-    meta = _load_book_meta(metadata_csv)
+    authors_list_path = (root / args.authors_list).resolve()
+    if authors_list_path.exists():
+        notable, single_tokens = _load_notable_names(authors_list_path)
+    else:
+        print(f"Warning: missing authors list: {authors_list_path} (continuing without notables)", flush=True)
+        notable, single_tokens = set(), set()
+    titles, authors_by_id, downloads_by_id, notable_book_ids = _load_metadata(
+        metadata_csv, notable=notable, single_tokens=single_tokens
+    )
 
     out_db.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(str(out_db)) as conn:
@@ -361,6 +519,26 @@ def main() -> None:
 
         max_books = max(0, int(args.max_books))
         text_files = list(_iter_text_files(text_dir))
+        top_popular_ids: set[int] = set()
+        if downloads_by_id:
+            by_popularity = sorted(
+                ((bid, downloads_by_id.get(bid, -1)) for bid, _ in text_files),
+                key=lambda item: item[1],
+                reverse=True,
+            )
+            top_popular_ids = {bid for bid, _ in by_popularity[:1000]}
+
+        def sort_key(item: tuple[int, Path]) -> tuple[int, int]:
+            book_id = item[0]
+            if book_id in top_popular_ids:
+                tier = 0
+            elif book_id in notable_book_ids:
+                tier = 1
+            else:
+                tier = 2
+            return (tier, -downloads_by_id.get(book_id, -1))
+
+        text_files.sort(key=sort_key)
         if max_books:
             text_files = text_files[:max_books]
         total_books = len(text_files)
@@ -514,7 +692,8 @@ def main() -> None:
                         _print_progress(force=True)
                         continue
 
-                title, author = meta.get(book_id, (None, None))
+                title = titles.get(book_id)
+                author = authors_by_id.get(book_id)
 
                 if resume and not args.overwrite:
                     # If we previously crashed mid-book, remove any partial rows for this book

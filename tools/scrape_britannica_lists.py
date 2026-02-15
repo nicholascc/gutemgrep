@@ -40,6 +40,10 @@ SOURCES = [
 ]
 
 OUT_PATH = "gutenberg/metadata/notable_authors_britannica.csv"
+WARNING = (
+    "WARNING: This script is unfinished and may not correctly parse Britannica "
+    "lists. It was left here for reference only."
+)
 
 
 def _to_ascii(text: str) -> str:
@@ -99,6 +103,7 @@ def extract_items(text: str):
 
 
 def main() -> int:
+    print(WARNING, file=sys.stderr)
     aggregated = {}
     for source in SOURCES:
         text = fetch_text(source["url"])
