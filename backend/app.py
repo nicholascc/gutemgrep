@@ -17,8 +17,9 @@ class AppConfig:
     embedding_db_path: Path
     queries_db_path: Path
     embeddings_table: str
-    openai_api_key: Optional[str]
-    openai_embedding_model: str
+    jina_api_key: Optional[str]
+    jina_embedding_model: str
+    jina_embedding_task: str
     default_top_k: int
     static_dir: Optional[Path]
 
@@ -97,17 +98,22 @@ def _ensure_queries_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def _openai_embed_text(*, api_key: str, model: str, text: str) -> np.ndarray:
+def _jina_embed_text(*, api_key: str, model: str, task: str, text: str) -> np.ndarray:
     resp = requests.post(
-        "https://api.openai.com/v1/embeddings",
+        "https://api.jina.ai/v1/embeddings",
         headers={"Authorization": f"Bearer {api_key}"},
-        json={"model": model, "input": text},
+        json={"model": model, "task": task, "input": [text], "truncate": True},
         timeout=30,
     )
     if resp.status_code >= 400:
-        raise RuntimeError(f"OpenAI embeddings error ({resp.status_code}): {resp.text}")
+        raise RuntimeError(f"Jina embeddings error ({resp.status_code}): {resp.text}")
     data = resp.json()
-    embedding = data["data"][0]["embedding"]
+    items = data.get("data") or []
+    if not isinstance(items, list) or not items:
+        raise RuntimeError(f"Unexpected embeddings response shape: {data}")
+    embedding = items[0].get("embedding")
+    if not isinstance(embedding, list) or not embedding:
+        raise RuntimeError(f"Unexpected embeddings response shape: {data}")
     return np.asarray(embedding, dtype=np.float32)
 
 
@@ -295,7 +301,7 @@ def _load_saved_query(
         if not results_rows:
             return {"uuid": uuid_value, "results": []}
 
-        # Rehydrate paragraph/context details from embedding DB, without calling OpenAI again.
+        # Rehydrate paragraph/context details from embedding DB, without calling the embed API again.
         embed_ids = [int(r["embed_id"]) for r in results_rows]
         with _connect_sqlite(embedding_db_path) as econn:
             if not _has_table(econn, embeddings_table):
@@ -356,8 +362,9 @@ def create_app() -> Flask:
         embedding_db_path=_env_path("EMBEDDING_DB_PATH", root / "embedding.db", root=root),
         queries_db_path=_env_path("QUERIES_DB_PATH", root / "queries.db", root=root),
         embeddings_table=os.environ.get("EMBEDDINGS_TABLE", "embeddings"),
-        openai_api_key=os.environ.get("OPENAI_API_KEY"),
-        openai_embedding_model=os.environ.get("OPENAI_EMBED_MODEL", "text-embedding-3-small"),
+        jina_api_key=os.environ.get("JINA_API_KEY"),
+        jina_embedding_model=os.environ.get("JINA_EMBED_MODEL", "jina-embeddings-v3"),
+        jina_embedding_task=os.environ.get("JINA_EMBED_TASK", "text-matching"),
         default_top_k=int(os.environ.get("DEFAULT_TOP_K", "10")),
         static_dir=_env_optional_path("STATIC_DIR", root=root),
     )
@@ -376,6 +383,10 @@ def create_app() -> Flask:
                 "embedding_db_path": str(cfg.embedding_db_path),
                 "queries_db_path": str(cfg.queries_db_path),
                 "embeddings_table": cfg.embeddings_table,
+                "embed_provider": "jina",
+                "jina_embedding_model": cfg.jina_embedding_model,
+                "jina_embedding_task": cfg.jina_embedding_task,
+                "has_jina_api_key": bool(cfg.jina_api_key),
             }
         )
 
@@ -419,13 +430,14 @@ def create_app() -> Flask:
         include_context = body.get("include_context", True)
         include_context_bool = bool(include_context)
 
-        if not cfg.openai_api_key:
-            return jsonify({"ok": False, "error": "OPENAI_API_KEY not set"}), 500
+        if not cfg.jina_api_key:
+            return jsonify({"ok": False, "error": "JINA_API_KEY not set"}), 500
 
         try:
-            query_vec = _openai_embed_text(
-                api_key=cfg.openai_api_key,
-                model=cfg.openai_embedding_model,
+            query_vec = _jina_embed_text(
+                api_key=cfg.jina_api_key,
+                model=cfg.jina_embedding_model,
+                task=cfg.jina_embedding_task,
                 text=query_text,
             )
             results = _search_embeddings(
