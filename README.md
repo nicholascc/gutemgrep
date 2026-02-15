@@ -1,25 +1,41 @@
 # gutemgrep
 
-well. i would like to download {all of gutenberg, some of annas archive, some of arxiv}, embed every paragraph, and run search on it for arbitrary objectives
+(this is an older pun name based on "gutenberg" + "mgrep", but it's called Quire now.)
 
-mostly i want vector scores for everythinggg
+The two of us have been thinking a lot about the future of the humanities. Literature and philosophy offer us entry into the minds of other humans, deepen our thought, and tie us to our common heritage; we believe they're extremely important, and worth investing in. 
 
-one thing i want is like. paragraphs that maximize for certain attributes: love, pretension, vagueness, evilness, &c. just to play around with
+As technologists, the question naturally arises: what new affordances do all these huge advances in NLP offer us? For Treehacks this year, we wanted to explore this question. We created Quire, an interactive embedding-based exploration tool for interfacing with classic works in the humanities.
 
-“most romantic paragraphs on arxiv”
+A quire, in bookbinding, is a set of leaves stitched together. Likewise, quire.ink stitches together the Project Gutenberg archive — more than 70k books dating back to before 1105 BC — into a creative, experimental search interface, designed for navigating and connecting Gutenberg's huge library of classic texts.
 
-for books you can do scoring on every part of the book and get summary statistics. what predicts shifts toward action in novels? what is the usual sentiment arc in each genre? how does style change throughout works?
+In this devpost there's a bunch of detail about how we built it, but we think the best thing to do to understand a new type of tool is to use it! Try it out at https://quire.ink
 
-one thing i want is like. paragraphs that maximize for certain attributes: love, pretension, vagueness, evilness, &c. just to play around with
+--- 
 
-mostly for humanities, thinking project gutenberg as first application and see if we cant scale
+### How we built Quire
 
-annas archive is open—but hard to download
+We downloaded (most of) the Project Gutenberg digital archive, and embedded it paragraph-by-paragraph using ElasticSearch's jina-embeddings-v3 into a custom database. We implemented an efficient custom cosine similarity search algorithm that reduced query time by 50x (10s -> 50ms), then built a ton of features in React for interacting with the archive through the embeddings, serving everything from a single Flask server.
 
-@harrison
-my friend (albert huang) did something similar to this a while ago and actually made + sold a company with it
+### What Quire does
 
-Recommendation: use paragraph-level embeddings (with light overlap) rather than maxing the embedding context window, because this preserves granularity for “top paragraphs” queries and cheaper, more interpretable per-book stats; pick a strong general-purpose model like `text-embedding-3-large` (or `text-embedding-3-small` for cost) or open-source `bge-large-en-v1.5`/`e5-large-v2`, and optionally store a second “contextual” vector that includes neighboring paragraphs for recall on ambiguous passages while keeping the primary index paragraph-only.
+The fundamental goal of Quire is to let you move laterally through texts, "stitching" them together and finding passages with common semantic aspects. The primary feature is the search bar, which takes in any text query, embeds it, and then runs our faster algorithm to find the 10 most similar passages across the entire Gutenberg archive. You can then open any of these passages to see the whole book it's contained within, see other similar passages, and, most importantly, **save it to your collection**. 
+
+The collection is a sidebar space that accumulates passages of text. These can be passages from books, but can also be custom text, or text that you altered using a builtin LLM rewriter (e.g. you can "rewrite this passage with a male main character" if you want to search for similar passages with characters of a different gender). Once you've accumulated text in your collection, you can average across a group of paassages to create a combined average embedding vector, which you can use to search — this allows you to search for passages that are similar to a whole group of passages, rather than just a single passage at a time.
+
+
+### What opportunities does this open up?
+
+Quire lets you ask all sorts of new questions that were much harder to ask before.  Rather than relying on secondary literature and human sorting, you can now search passage-by-passage through this huge corpus of major works, and move through the embedding space using custom alterations and search vectors.
+
+Some examples: 
+
+- You can find the passages in human literature that are maximally romantic, or maximally philosophical, or both of those at once, by collecting passages that have those characteristics, combining their embeddings, and searching.
+- You can find new primary sources for specific questions, e.g. how people understood 'sovereignty' throughout time, just by searching in natural language (e.g. 'philosophical passages on the question of sovereignty'). 
+- You can discover precursor works and possible influences in poetry by embedding a corpus of a poet's work.
+
+But to be honest, we think you won't really get what Quire is until you've used it. Try it out at https://quire.ink/! (works great on both mobile + desktop)
+
+
 
 # Gutenberg Embedding Search — Design Doc
 
