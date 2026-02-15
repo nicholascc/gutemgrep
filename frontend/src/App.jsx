@@ -214,6 +214,7 @@ function SimilarCarousel({ embedId, allResults, onNavigate, onCollect, collected
         score: x.score,
         paragraph_text: x.paragraph_text,
         book_title: x.book_title,
+        author: x.author,
       }))
       .sort((a, b) => b.score - a.score)
       .slice(0, 4);
@@ -272,6 +273,7 @@ function SimilarCard({ item, onClick, onCollect, collected }) {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
         <span style={{ fontFamily: FONT, fontStyle: "italic", fontSize: 12, color: WARM(0.45) }}>
           {renderFormatted(item.book_title)}
+          {item.author && <span style={{ color: WARM(0.3), marginLeft: 4 }}>{"\u2014"} {item.author}</span>}
         </span>
         <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
           {onCollect && <CollectButton collected={collected} onCollect={onCollect} size="small" />}
@@ -360,6 +362,11 @@ function BookReader({ result, allResults, onCollapse, onTextSelect, onNavigateTo
           <span style={{ fontFamily: FONT, fontStyle: "italic", fontSize: 20, color: WARM(0.8), letterSpacing: "0.02em" }}>
             {renderFormatted(result.book_title)}
           </span>
+          {result.author && (
+            <span style={{ fontFamily: FONT, fontStyle: "italic", fontSize: 15, color: WARM(0.45), marginLeft: 10 }}>
+              {"\u2014"} {result.author}
+            </span>
+          )}
           {result.book_id && (
             <span style={{ fontFamily: FONT, fontSize: 12, color: WARM(0.3), marginLeft: 12 }}>
               #{result.book_id}
@@ -407,17 +414,21 @@ function BookReader({ result, allResults, onCollapse, onTextSelect, onNavigateTo
             {"loading book\u2026"}
           </p>
         )}
-        {loaded && paragraphs.map((para) => {
-          const isHighlight = para.embed_id === result.embed_id;
-          return (
-            <BookParagraphWithRef
-              key={para.embed_id} para={para} isHighlight={isHighlight}
-              innerRef={isHighlight ? highlightRef : null}
-              onCollect={onCollect ? (p) => onCollect({ embed_id: p.embed_id, paragraph_text: p.text, book_title: result.book_title, book_id: result.book_id }) : null}
-              collected={collectedIds ? collectedIds.has(para.embed_id) : false}
-            />
-          );
-        })}
+        {loaded && (
+          <div style={{ animation: "fadeIn 0.5s ease" }}>
+            {paragraphs.map((para) => {
+              const isHighlight = para.embed_id === result.embed_id;
+              return (
+                <BookParagraphWithRef
+                  key={para.embed_id} para={para} isHighlight={isHighlight}
+                  innerRef={isHighlight ? highlightRef : null}
+                  onCollect={onCollect ? (p) => onCollect({ embed_id: p.embed_id, paragraph_text: p.text, book_title: result.book_title, book_id: result.book_id }) : null}
+                  collected={collectedIds ? collectedIds.has(para.embed_id) : false}
+                />
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Lateral carousel pinned at bottom */}
@@ -550,19 +561,21 @@ function CollectButton({ collected, onCollect, size = "normal" }) {
 
 // ─── Collection Sidebar (LEFT) ──────────────────────────────────────────────
 
-function CollectionSidebar({ items, open, onClose, onRemove, selected, onToggleSelect, onCreateVector, customTexts, onAddCustomText, onRemoveCustomText }) {
+function CollectionSidebar({ items, open, onClose, onRemove, selected, onToggleSelect, onCreateVector, customTexts, selectedCustomIndices, onToggleCustomSelect, onAddCustomText, onRemoveCustomText }) {
   const [newText, setNewText] = useState("");
   const [vectorName, setVectorName] = useState("");
   const [showNaming, setShowNaming] = useState(false);
   const [creating, setCreating] = useState(false);
 
-  const hasSelection = selected.size > 0 || customTexts.length > 0;
+  const hasSelection = selected.size > 0 || selectedCustomIndices.size > 0;
+
+  const selectedCustomTexts = customTexts.filter((_, i) => selectedCustomIndices.has(i));
 
   const handleCreate = async () => {
     if (!vectorName.trim()) return;
     setCreating(true);
     try {
-      await onCreateVector(vectorName.trim(), selected, customTexts);
+      await onCreateVector(vectorName.trim(), selected, selectedCustomTexts);
       setVectorName("");
       setShowNaming(false);
     } finally {
@@ -606,7 +619,7 @@ function CollectionSidebar({ items, open, onClose, onRemove, selected, onToggleS
                     type="checkbox"
                     checked={isSelected}
                     onChange={() => onToggleSelect(item.embed_id)}
-                    style={{ marginTop: 4, flexShrink: 0, accentColor: WARM(0.6), cursor: "pointer" }}
+                    style={{ marginTop: 4, flexShrink: 0 }}
                   />
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <p style={{ fontFamily: FONT, fontSize: 13.5, lineHeight: 1.6, color: DIM(isSelected ? 0.85 : 0.65), margin: "0 0 4px 0", transition: "color 0.2s ease" }}>
@@ -631,34 +644,43 @@ function CollectionSidebar({ items, open, onClose, onRemove, selected, onToggleS
               );
             })}
 
-            {customTexts.map((text, i) => (
-              <div key={`custom-${i}`} style={{
-                display: "flex", gap: 10, padding: "12px 0",
-                borderBottom: `1px solid ${WARM(0.06)}`, alignItems: "flex-start",
-              }}>
-                <div style={{ width: 16, flexShrink: 0, marginTop: 4, textAlign: "center" }}>
-                  <span style={{ fontFamily: FONT, fontSize: 10, color: WARM(0.35) }}>T</span>
+            {customTexts.map((text, i) => {
+              const isSelected = selectedCustomIndices.has(i);
+              return (
+                <div key={`custom-${i}`} style={{
+                  display: "flex", gap: 10, padding: "12px 0",
+                  borderBottom: `1px solid ${WARM(0.06)}`, alignItems: "flex-start",
+                }}>
+                  <input
+                    type="checkbox"
+                    checked={isSelected}
+                    onChange={() => onToggleCustomSelect(i)}
+                    style={{ marginTop: 4, flexShrink: 0 }}
+                  />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <p style={{ fontFamily: FONT, fontSize: 13.5, lineHeight: 1.6, color: DIM(isSelected ? 0.85 : 0.65), margin: 0, fontStyle: "italic", transition: "color 0.2s ease" }}>
+                      {text.length > 100 ? text.slice(0, 100) + "\u2026" : text}
+                    </p>
+                    <span style={{ fontFamily: FONT, fontSize: 11.5, color: WARM(0.3), fontStyle: "italic" }}>
+                      <span style={{ fontFamily: FONT, fontSize: 10, color: WARM(0.35), marginRight: 4, fontStyle: "normal" }}>T</span>
+                      custom text
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => onRemoveCustomText(i)}
+                    style={{
+                      background: "none", border: "none", color: WARM(0.25),
+                      cursor: "pointer", fontSize: 16, lineHeight: 1, padding: "2px 4px",
+                      flexShrink: 0, transition: "color 0.2s ease",
+                    }}
+                    onMouseEnter={(e) => (e.target.style.color = WARM(0.6))}
+                    onMouseLeave={(e) => (e.target.style.color = WARM(0.25))}
+                  >
+                    {"\u00d7"}
+                  </button>
                 </div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <p style={{ fontFamily: FONT, fontSize: 13.5, lineHeight: 1.6, color: DIM(0.65), margin: 0, fontStyle: "italic" }}>
-                    {text.length > 100 ? text.slice(0, 100) + "\u2026" : text}
-                  </p>
-                  <span style={{ fontFamily: FONT, fontSize: 11.5, color: WARM(0.3), fontStyle: "italic" }}>custom text</span>
-                </div>
-                <button
-                  onClick={() => onRemoveCustomText(i)}
-                  style={{
-                    background: "none", border: "none", color: WARM(0.25),
-                    cursor: "pointer", fontSize: 16, lineHeight: 1, padding: "2px 4px",
-                    flexShrink: 0, transition: "color 0.2s ease",
-                  }}
-                  onMouseEnter={(e) => (e.target.style.color = WARM(0.6))}
-                  onMouseLeave={(e) => (e.target.style.color = WARM(0.25))}
-                >
-                  {"\u00d7"}
-                </button>
-              </div>
-            ))}
+              );
+            })}
           </>
         )}
       </div>
@@ -709,7 +731,7 @@ function CollectionSidebar({ items, open, onClose, onRemove, selected, onToggleS
             onMouseEnter={(e) => { e.target.style.background = WARM(0.12); e.target.style.borderColor = WARM(0.25); }}
             onMouseLeave={(e) => { e.target.style.background = WARM(0.08); e.target.style.borderColor = WARM(0.15); }}
           >
-            create vector ({selected.size} passage{selected.size !== 1 ? "s" : ""}{customTexts.length > 0 ? ` + ${customTexts.length} text` : ""})
+            create vector ({selected.size} passage{selected.size !== 1 ? "s" : ""}{selectedCustomIndices.size > 0 ? ` + ${selectedCustomIndices.size} text` : ""})
           </button>
         )}
 
@@ -960,10 +982,11 @@ function ResultCard({ result, index, onTextSelect, onExpand, onCollect, collecte
         marginBottom: 36, position: "relative",
       }}
     >
-      {/* Book title + score */}
+      {/* Book title + author + score */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 10, padding: "0 2px" }}>
         <span style={{ fontFamily: FONT, fontStyle: "italic", fontSize: 14, color: WARM(0.7), letterSpacing: "0.02em" }}>
           {renderFormatted(result.book_title)}
+          {result.author && <span style={{ color: WARM(0.4), marginLeft: 6, fontSize: 13 }}>{"\u2014"} {result.author}</span>}
           {result.book_id != null && <span style={{ color: WARM(0.35), marginLeft: 8, fontSize: 12, fontStyle: "normal" }}>#{result.book_id}</span>}
         </span>
         <span style={{ fontFamily: FONT, fontSize: 12, color: WARM(0.35), fontVariantNumeric: "tabular-nums" }}>
@@ -1019,6 +1042,7 @@ export default function GutemGrep() {
   const [selectionTooltip, setSelectionTooltip] = useState({ text: null, position: null });
   const [collection, setCollection] = useState(() => loadCollection());
   const [customTexts, setCustomTexts] = useState([]);
+  const [selectedCustomIndices, setSelectedCustomIndices] = useState(new Set());
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [collectionOpen, setCollectionOpen] = useState(false);
   const [vectors, setVectors] = useState([]);
@@ -1108,6 +1132,23 @@ export default function GutemGrep() {
 
   useEffect(() => () => clearTimers(), []);
 
+  // Lock body scroll when book reader is open to prevent scrollbar jolt
+  useEffect(() => {
+    const inBook = viewPhase === "book" || viewPhase === "fade-out";
+    if (inBook) {
+      const scrollbarWidth = window.innerWidth - document.documentElement.clientWidth;
+      document.body.style.overflow = "hidden";
+      document.body.style.paddingRight = `${scrollbarWidth}px`;
+    } else {
+      document.body.style.overflow = "";
+      document.body.style.paddingRight = "";
+    }
+    return () => {
+      document.body.style.overflow = "";
+      document.body.style.paddingRight = "";
+    };
+  }, [viewPhase]);
+
   const doSearch = useCallback(async (searchText) => {
     if (!searchText.trim()) return;
     setSearching(true);
@@ -1177,12 +1218,34 @@ export default function GutemGrep() {
     });
   }, []);
 
+  const handleToggleCustomSelect = useCallback((index) => {
+    setSelectedCustomIndices(prev => {
+      const next = new Set(prev);
+      if (next.has(index)) next.delete(index);
+      else next.add(index);
+      return next;
+    });
+  }, []);
+
   const handleAddCustomText = useCallback((text) => {
-    setCustomTexts(prev => [...prev, text]);
+    setCustomTexts(prev => {
+      const next = [...prev, text];
+      // Auto-select newly added custom text
+      setSelectedCustomIndices(prevSel => new Set([...prevSel, next.length - 1]));
+      return next;
+    });
   }, []);
 
   const handleRemoveCustomText = useCallback((index) => {
     setCustomTexts(prev => prev.filter((_, i) => i !== index));
+    setSelectedCustomIndices(prev => {
+      const next = new Set();
+      for (const idx of prev) {
+        if (idx < index) next.add(idx);
+        else if (idx > index) next.add(idx - 1);
+      }
+      return next;
+    });
   }, []);
 
   const handleCreateVector = useCallback(async (name, selectedEmbedIds, texts) => {
@@ -1197,6 +1260,7 @@ export default function GutemGrep() {
     // Clear selections after creating
     setSelectedIds(new Set());
     setCustomTexts([]);
+    setSelectedCustomIndices(new Set());
     // Open vectors sidebar to show the new vector
     setVectorsOpen(true);
     setCollectionOpen(false);
@@ -1269,6 +1333,8 @@ export default function GutemGrep() {
         onToggleSelect={handleToggleSelect}
         onCreateVector={handleCreateVector}
         customTexts={customTexts}
+        selectedCustomIndices={selectedCustomIndices}
+        onToggleCustomSelect={handleToggleCustomSelect}
         onAddCustomText={handleAddCustomText}
         onRemoveCustomText={handleRemoveCustomText}
       />
@@ -1315,7 +1381,7 @@ export default function GutemGrep() {
                     }
                   }}
                 >
-                  gutemgrep
+                  in quire
                 </h1>
 
                 {isHome && (
