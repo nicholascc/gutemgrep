@@ -483,6 +483,59 @@ const BookParagraphWithRef = ({ para, isHighlight, innerRef, onCollect, collecte
   );
 };
 
+// ─── Text Reader (for custom texts) ─────────────────────────────────────────
+
+function TextReader({ text, onCollapse }) {
+  return (
+    <div style={{
+      width: "100%", maxWidth: 720, margin: "0 auto",
+      display: "flex", flexDirection: "column",
+      height: "100vh", padding: "20px 24px 0 24px",
+    }}>
+      <div style={{
+        display: "flex", justifyContent: "space-between", alignItems: "center",
+        marginBottom: 0, flexShrink: 0, paddingBottom: 16,
+        borderBottom: `1px solid ${WARM(0.06)}`,
+      }}>
+        <span style={{ fontFamily: FONT, fontStyle: "italic", fontSize: 20, color: WARM(0.8), letterSpacing: "0.02em" }}>
+          custom text
+        </span>
+        <button
+          onClick={onCollapse}
+          style={{
+            background: WARM(0.06), border: `1px solid ${WARM(0.12)}`,
+            borderRadius: 3, width: 44, height: 44, flexShrink: 0,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            cursor: "pointer", transition: "all 0.25s ease",
+          }}
+          onMouseEnter={(e) => { e.currentTarget.style.background = WARM(0.14); e.currentTarget.style.borderColor = WARM(0.25); }}
+          onMouseLeave={(e) => { e.currentTarget.style.background = WARM(0.06); e.currentTarget.style.borderColor = WARM(0.12); }}
+          aria-label="Close text reader"
+        >
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" style={{ transform: "rotate(180deg)" }}>
+            <path d="M6 14L14 6" stroke={WARM(0.65)} strokeWidth="2" strokeLinecap="round" />
+            <path d="M8 6L14 6L14 12" stroke={WARM(0.65)} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </button>
+      </div>
+      <div style={{
+        flex: 1, overflowY: "auto", padding: "24px 0 60px 0",
+        maskImage: "linear-gradient(to bottom, transparent 0%, black 2.5%, black 90%, transparent 100%)",
+        WebkitMaskImage: "linear-gradient(to bottom, transparent 0%, black 2.5%, black 90%, transparent 100%)",
+      }}>
+        <div style={{ padding: "10px 28px 10px 32px" }}>
+          <p style={{
+            fontFamily: FONT, fontSize: 18.5, lineHeight: 1.82,
+            color: PARCHMENT(0.88), margin: 0, letterSpacing: "0.01em",
+          }}>
+            {renderFormatted(text)}
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Selection Tooltip ───────────────────────────────────────────────────────
 
 function SelectionTooltip({ text, position, onSearch }) {
@@ -561,6 +614,60 @@ function CollectButton({ collected, onCollect, size = "normal" }) {
 
 // ─── Alter Button (inline) ───────────────────────────────────────────────────
 
+function AlterPromptRow({ inputRef, instruction, setInstruction, loading, handleSubmit, onCancel, fontSize }) {
+  return (
+    <div onClick={(e) => e.stopPropagation()} style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 6 }}>
+      <input
+        ref={inputRef}
+        type="text"
+        value={instruction}
+        onChange={(e) => setInstruction(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") handleSubmit();
+          if (e.key === "Escape") onCancel();
+        }}
+        placeholder={"how to alter\u2026"}
+        disabled={loading}
+        style={{
+          background: "rgba(18, 16, 24, 0.6)",
+          border: `1px solid ${WARM(0.15)}`, borderRadius: 3,
+          padding: "4px 8px", fontFamily: FONT, fontStyle: "italic",
+          fontSize: fontSize - 1, color: PARCHMENT(0.8), outline: "none",
+          width: 150,
+        }}
+      />
+      {loading ? (
+        <span style={{ fontFamily: FONT, fontStyle: "italic", fontSize: fontSize - 1, color: WARM(0.4), animation: "pulseGlow 1.5s ease infinite", whiteSpace: "nowrap" }}>
+          {"\u2026"}
+        </span>
+      ) : (
+        <button
+          onClick={handleSubmit}
+          style={{
+            background: "none", border: "none", fontFamily: FONT,
+            fontStyle: "italic", fontSize: fontSize - 1, padding: "2px 0",
+            color: WARM(instruction.trim() ? 0.6 : 0.25),
+            cursor: instruction.trim() ? "pointer" : "default",
+            whiteSpace: "nowrap",
+          }}
+        >
+          go
+        </button>
+      )}
+      <button
+        onClick={onCancel}
+        style={{
+          background: "none", border: "none", fontFamily: FONT,
+          fontSize: fontSize - 1, padding: "2px 0",
+          color: WARM(0.3), cursor: "pointer", whiteSpace: "nowrap",
+        }}
+      >
+        {"\u00d7"}
+      </button>
+    </div>
+  );
+}
+
 function AlterButton({ text, onAltered, size = "normal" }) {
   const [expanded, setExpanded] = useState(false);
   const [instruction, setInstruction] = useState("");
@@ -590,61 +697,16 @@ function AlterButton({ text, onAltered, size = "normal" }) {
     }
   };
 
-  if (expanded) {
+  const onCancel = () => { setExpanded(false); setInstruction(""); };
+
+  if (size !== "small" && expanded) {
     return (
-      <div onClick={(e) => e.stopPropagation()} style={{ display: "flex", gap: 6, alignItems: "center" }}>
-        <input
-          ref={inputRef}
-          type="text"
-          value={instruction}
-          onChange={(e) => setInstruction(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") handleSubmit();
-            if (e.key === "Escape") { setExpanded(false); setInstruction(""); }
-          }}
-          placeholder={"how to alter\u2026"}
-          disabled={loading}
-          style={{
-            background: "rgba(18, 16, 24, 0.6)",
-            border: `1px solid ${WARM(0.15)}`, borderRadius: 3,
-            padding: "4px 8px", fontFamily: FONT, fontStyle: "italic",
-            fontSize: fontSize - 1, color: PARCHMENT(0.8), outline: "none",
-            width: 150,
-          }}
-        />
-        {loading ? (
-          <span style={{ fontFamily: FONT, fontStyle: "italic", fontSize: fontSize - 1, color: WARM(0.4), animation: "pulseGlow 1.5s ease infinite", whiteSpace: "nowrap" }}>
-            {"\u2026"}
-          </span>
-        ) : (
-          <button
-            onClick={handleSubmit}
-            style={{
-              background: "none", border: "none", fontFamily: FONT,
-              fontStyle: "italic", fontSize: fontSize - 1, padding: "2px 0",
-              color: WARM(instruction.trim() ? 0.6 : 0.25),
-              cursor: instruction.trim() ? "pointer" : "default",
-              whiteSpace: "nowrap",
-            }}
-          >
-            go
-          </button>
-        )}
-        <button
-          onClick={() => { setExpanded(false); setInstruction(""); }}
-          style={{
-            background: "none", border: "none", fontFamily: FONT,
-            fontSize: fontSize - 1, padding: "2px 0",
-            color: WARM(0.3), cursor: "pointer", whiteSpace: "nowrap",
-          }}
-        >
-          {"\u00d7"}
-        </button>
-      </div>
+      <AlterPromptRow inputRef={inputRef} instruction={instruction} setInstruction={setInstruction}
+        loading={loading} handleSubmit={handleSubmit} onCancel={onCancel} fontSize={fontSize} />
     );
   }
 
-  return (
+  const trigger = (
     <button
       onClick={(e) => { e.stopPropagation(); setExpanded(true); }}
       onMouseEnter={() => setHovered(true)}
@@ -660,6 +722,20 @@ function AlterButton({ text, onAltered, size = "normal" }) {
       + alter
     </button>
   );
+
+  if (size === "small" && expanded) {
+    return (
+      <>
+        {trigger}
+        <div style={{ flexBasis: "100%" }}>
+          <AlterPromptRow inputRef={inputRef} instruction={instruction} setInstruction={setInstruction}
+            loading={loading} handleSubmit={handleSubmit} onCancel={onCancel} fontSize={fontSize} />
+        </div>
+      </>
+    );
+  }
+
+  return trigger;
 }
 
 // ─── Sidebar Action Button ──────────────────────────────────────────────────
@@ -690,7 +766,7 @@ function SidebarSearchButton({ onClick }) {
 
 // ─── Collection Sidebar (LEFT) ──────────────────────────────────────────────
 
-function CollectionSidebar({ items, open, onClose, onRemove, selected, onToggleSelect, onCreateVector, customTexts, selectedCustomIndices, onToggleCustomSelect, onAddCustomText, onRemoveCustomText, onAlter, onSearchByText, onOpenBook }) {
+function CollectionSidebar({ items, open, onClose, onRemove, selected, onToggleSelect, onCreateVector, customTexts, selectedCustomIndices, onToggleCustomSelect, onAddCustomText, onRemoveCustomText, onAlter, onSearchByText, onOpenBook, onReadText }) {
   const [newText, setNewText] = useState("");
   const [vectorName, setVectorName] = useState("");
   const [showNaming, setShowNaming] = useState(false);
@@ -754,9 +830,8 @@ function CollectionSidebar({ items, open, onClose, onRemove, selected, onToggleS
                     <p style={{ fontFamily: FONT, fontSize: 13.5, lineHeight: 1.6, color: DIM(isSelected ? 0.85 : 0.65), margin: "0 0 4px 0", transition: "color 0.2s ease" }}>
                       {renderFormatted(item.paragraph_text.length > 100 ? item.paragraph_text.slice(0, 100) + "\u2026" : item.paragraph_text)}
                     </p>
+                    <div style={{ fontFamily: FONT, fontStyle: "italic", fontSize: 11.5, color: WARM(0.3), marginBottom: 4 }}>{renderFormatted(item.book_title)}</div>
                     <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
-                      <span style={{ fontFamily: FONT, fontStyle: "italic", fontSize: 11.5, color: WARM(0.3) }}>{renderFormatted(item.book_title)}</span>
-                      <span style={{ color: WARM(0.1) }}>{"\u00b7"}</span>
                       <SidebarSearchButton onClick={() => onSearchByText(item.paragraph_text)} />
                       <SidebarActionButton label="read" onClick={() => onOpenBook(item)} />
                       <AlterButton text={item.paragraph_text} onAltered={onAlter} size="small" />
@@ -793,17 +868,17 @@ function CollectionSidebar({ items, open, onClose, onRemove, selected, onToggleS
                     style={{ marginTop: 4, flexShrink: 0 }}
                   />
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <p style={{ fontFamily: FONT, fontSize: 13.5, lineHeight: 1.6, color: DIM(isSelected ? 0.85 : 0.65), margin: 0, fontStyle: "italic", transition: "color 0.2s ease" }}>
+                    <p style={{ fontFamily: FONT, fontSize: 13.5, lineHeight: 1.6, color: DIM(isSelected ? 0.85 : 0.65), margin: "0 0 4px 0", fontStyle: "italic", transition: "color 0.2s ease" }}>
                       {text.length > 100 ? text.slice(0, 100) + "\u2026" : text}
                     </p>
-                    <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-                      <span style={{ fontFamily: FONT, fontSize: 11.5, color: WARM(0.3), fontStyle: "italic" }}>
-                        <span style={{ fontFamily: FONT, fontSize: 10, color: WARM(0.35), marginRight: 4, fontStyle: "normal" }}>T</span>
-                        custom text
-                      </span>
-                      <span style={{ color: WARM(0.1) }}>{"\u00b7"}</span>
-                      <AlterButton text={text} onAltered={onAlter} size="small" />
+                    <div style={{ fontFamily: FONT, fontSize: 11.5, color: WARM(0.3), fontStyle: "italic", marginBottom: 4 }}>
+                      <span style={{ fontFamily: FONT, fontSize: 10, color: WARM(0.35), marginRight: 4, fontStyle: "normal" }}>T</span>
+                      custom text
+                    </div>
+                    <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
                       <SidebarSearchButton onClick={() => onSearchByText(text)} />
+                      <SidebarActionButton label="read" onClick={() => onReadText(text)} />
+                      <AlterButton text={text} onAltered={onAlter} size="small" />
                     </div>
                   </div>
                   <button
@@ -1189,6 +1264,7 @@ export default function GutemGrep() {
   const [vectors, setVectors] = useState([]);
   const [vectorsOpen, setVectorsOpen] = useState(false);
   const [expandedResult, setExpandedResult] = useState(null);
+  const [expandedCustomText, setExpandedCustomText] = useState(null);
   const [viewPhase, setViewPhase] = useState("search"); // "search" | "fade-out" | "book" | "fade-out-book"
   const [loadingToken, setLoadingToken] = useState(!!token);
   const timersRef = useRef([]);
@@ -1256,6 +1332,16 @@ export default function GutemGrep() {
     clearTimers();
     setSelectionTooltip({ text: null, position: null });
     setExpandedResult(result);
+    setExpandedCustomText(null);
+    setViewPhase("fade-out");
+    later(() => setViewPhase("book"), FADE_MS);
+  }, []);
+
+  const doExpandText = useCallback((text) => {
+    clearTimers();
+    setSelectionTooltip({ text: null, position: null });
+    setExpandedCustomText(text);
+    setExpandedResult(null);
     setViewPhase("fade-out");
     later(() => setViewPhase("book"), FADE_MS);
   }, []);
@@ -1268,6 +1354,7 @@ export default function GutemGrep() {
     later(() => {
       setViewPhase("search");
       setExpandedResult(null);
+      setExpandedCustomText(null);
     }, FADE_MS);
   }, []);
 
@@ -1481,6 +1568,7 @@ export default function GutemGrep() {
         onAlter={handleAddCustomText}
         onSearchByText={(text) => { setCollectionOpen(false); doSearch(text); }}
         onOpenBook={(item) => { setCollectionOpen(false); doExpand({ embed_id: item.embed_id, paragraph_text: item.paragraph_text, book_title: item.book_title, book_id: item.book_id, score: 0 }, null); }}
+        onReadText={(text) => { setCollectionOpen(false); doExpandText(text); }}
       />
       {!collectionOpen && <CollectionTab count={collection.length} onClick={() => setCollectionOpen(true)} />}
 
@@ -1629,6 +1717,20 @@ export default function GutemGrep() {
             onCollect={handleCollect}
             collectedIds={collectedIds}
           />
+        </div>
+      )}
+
+      {/* ── TEXT READER (custom texts) ── */}
+      {showBook && expandedCustomText && (
+        <div style={{
+          position: "fixed", inset: 0,
+          display: "flex", flexDirection: "column", alignItems: "center",
+          opacity: viewPhase === "fade-out-book" ? 0 : 1,
+          pointerEvents: viewPhase === "book" ? "auto" : "none",
+          transition: `opacity ${FADE_MS}ms ease`,
+          zIndex: 12,
+        }}>
+          <TextReader text={expandedCustomText} onCollapse={doCollapse} />
         </div>
       )}
     </div>
