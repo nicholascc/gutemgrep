@@ -29,9 +29,11 @@ class AppConfig:
     default_top_k: int
     static_dir: Optional[Path]
     hnsw_enabled: bool
+    hnsw_warm_build: bool
     hnsw_m: int
     hnsw_ef_construction: int
     hnsw_ef_search: int
+    hnsw_log_every: int
 
 
 def _repo_root() -> Path:
@@ -186,6 +188,7 @@ def _build_hnsw_index(
     m: int,
     ef_construction: int,
     ef_search: int,
+    log_every: int,
 ) -> Tuple["hnswlib.Index", Tuple[int, int]]:
     if hnswlib is None:
         raise RuntimeError("hnswlib is not installed; disable HNSW or add the dependency.")
@@ -219,6 +222,8 @@ def _build_hnsw_index(
         batch_ids: List[int] = []
         batch_vecs: List[np.ndarray] = []
         batch_size = 10000
+        processed = 0
+        log_every = max(int(log_every), 0)
 
         for row in conn.execute(
             f"SELECT embed_id, embedding FROM {embeddings_table} WHERE embedding IS NOT NULL"
@@ -233,11 +238,17 @@ def _build_hnsw_index(
             batch_vecs.append(vec)
             if len(batch_ids) >= batch_size:
                 index.add_items(np.vstack(batch_vecs), np.asarray(batch_ids, dtype=np.int64))
+                processed += len(batch_ids)
+                if log_every and processed % log_every == 0:
+                    print(f"[hnsw] indexed {processed}/{total} vectors")
                 batch_ids = []
                 batch_vecs = []
 
         if batch_ids:
             index.add_items(np.vstack(batch_vecs), np.asarray(batch_ids, dtype=np.int64))
+            processed += len(batch_ids)
+            if log_every:
+                print(f"[hnsw] indexed {processed}/{total} vectors")
 
         index.set_ef(max(ef_search, 1))
 
@@ -536,9 +547,11 @@ def create_app() -> Flask:
         default_top_k=int(os.environ.get("DEFAULT_TOP_K", "10")),
         static_dir=_env_optional_path("STATIC_DIR", root=root),
         hnsw_enabled=_env_bool("HNSW_ENABLED", True),
+        hnsw_warm_build=_env_bool("HNSW_WARM_BUILD", True),
         hnsw_m=int(os.environ.get("HNSW_M", "16")),
         hnsw_ef_construction=int(os.environ.get("HNSW_EF_CONSTRUCTION", "200")),
         hnsw_ef_search=int(os.environ.get("HNSW_EF_SEARCH", "64")),
+        hnsw_log_every=int(os.environ.get("HNSW_LOG_EVERY", "50000")),
     )
 
     # Disable Flask's built-in static route (/static/...) so our explicit
@@ -550,6 +563,27 @@ def create_app() -> Flask:
         "index": None,
         "file_sig": None,
     }
+    if config.hnsw_enabled and config.hnsw_warm_build:
+        if hnswlib is None:
+            print("[hnsw] hnswlib not installed; skipping warm build")
+        else:
+            state = app.config["HNSW_STATE"]
+            with state["lock"]:
+                try:
+                    print("[hnsw] warm build start")
+                    index, file_sig = _build_hnsw_index(
+                        embedding_db_path=config.embedding_db_path,
+                        embeddings_table=config.embeddings_table,
+                        m=config.hnsw_m,
+                        ef_construction=config.hnsw_ef_construction,
+                        ef_search=config.hnsw_ef_search,
+                        log_every=config.hnsw_log_every,
+                    )
+                    state["index"] = index
+                    state["file_sig"] = file_sig
+                    print("[hnsw] warm build complete")
+                except Exception as exc:
+                    print(f"[hnsw] warm build failed: {exc}")
 
     @app.get("/health")
     def health() -> Response:
@@ -565,6 +599,7 @@ def create_app() -> Flask:
                 "jina_embedding_task": cfg.jina_embedding_task,
                 "has_jina_api_key": bool(cfg.jina_api_key),
                 "hnsw_enabled": cfg.hnsw_enabled,
+                "hnsw_warm_build": cfg.hnsw_warm_build,
             }
         )
 
@@ -631,6 +666,7 @@ def create_app() -> Flask:
                                 m=cfg.hnsw_m,
                                 ef_construction=cfg.hnsw_ef_construction,
                                 ef_search=cfg.hnsw_ef_search,
+                                log_every=cfg.hnsw_log_every,
                             )
                             state["index"] = index
                             state["file_sig"] = file_sig
