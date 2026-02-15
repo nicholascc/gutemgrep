@@ -299,6 +299,42 @@ def _jina_embed_text(*, api_key: str, model: str, task: str, text: str) -> np.nd
     return np.asarray(embedding, dtype=np.float32)
 
 
+def _anthropic_single_turn(
+    *,
+    api_key: str,
+    model: str,
+    prompt: str,
+    max_tokens: int,
+) -> str:
+    resp = requests.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        json={
+            "model": model,
+            "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": prompt}],
+        },
+        timeout=60,
+    )
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Anthropic API error ({resp.status_code}): {resp.text}")
+    data = resp.json()
+    content = data.get("content")
+    if not isinstance(content, list):
+        raise RuntimeError(f"Unexpected Anthropic response shape: {data}")
+    parts: List[str] = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "text" and isinstance(item.get("text"), str):
+            parts.append(item["text"])
+    return "".join(parts).strip()
+
+
 def _cosine_similarity(query_vec: np.ndarray, candidate_vec: np.ndarray) -> float:
     qn = float(np.linalg.norm(query_vec))
     cn = float(np.linalg.norm(candidate_vec))
@@ -1059,6 +1095,37 @@ def create_app() -> Flask:
             response_body["perf"] = perf_payload
 
         return jsonify(response_body)
+
+    @app.post("/haiku")
+    def haiku() -> Response:
+        cfg: AppConfig = app.config["APP_CONFIG"]
+        body = request.get_json(silent=True) or {}
+        prompt = body.get("prompt", "")
+        if not isinstance(prompt, str) or not prompt.strip():
+            return jsonify({"ok": False, "error": "Missing non-empty 'prompt'"}), 400
+
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            return jsonify({"ok": False, "error": "ANTHROPIC_API_KEY not set"}), 500
+
+        max_tokens = body.get("max_tokens", 512)
+        try:
+            max_tokens_int = int(max_tokens)
+        except Exception:
+            return jsonify({"ok": False, "error": "'max_tokens' must be an integer"}), 400
+        max_tokens_int = max(1, min(8192, max_tokens_int))
+
+        try:
+            text = _anthropic_single_turn(
+                api_key=api_key,
+                model="claude-haiku-4-5",
+                prompt=prompt,
+                max_tokens=max_tokens_int,
+            )
+        except Exception as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 500
+
+        return jsonify({"text": text})
 
     @app.get("/book/by-embed/<int:embed_id>")
     def book_by_embed(embed_id: int) -> Response:
