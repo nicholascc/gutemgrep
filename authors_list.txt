@@ -1,0 +1,267 @@
+Henry Adams
+Jane Addams
+Joseph Addison
+Leigh Hunt
+Moncure D. Conway
+Louisa May Alcott
+Kingsley Amis
+W. H. Auden
+Jane Austen
+A. J. Ayer
+James Baldwin
+J. M. Barrie
+Arnold Bennett
+Gertrude Bell
+Hilaire Belloc
+Margaret Benson
+E. C. Bentley
+Jeremy Bentham
+Elizabeth Barrett Browning
+Robert Browning
+Frances Hodgson Burnett
+Ambrose Bierce
+William Blake
+Enid Blyton
+Edmund Blunden
+Anne Bradstreet
+Charlotte Brontë
+Emily Brontë
+Anne Brontë
+Vera Brittain
+Richard Baxter
+Thomas Browne
+John Bunyan
+Edmund Burke
+Richard Francis Burton
+Samuel Butler
+Lord Byron
+James Branch Cabell
+Thomas Campbell
+Willa Cather
+Thomas Chatterton
+G. K. Chesterton
+Geoffrey Chaucer
+Anton Chekhov (in English corpus via translations; omit if you want strictly original English)
+Kate Chopin
+Winston Churchill
+Wilkie Collins
+Samuel Taylor Coleridge
+John Buchan
+Joseph Conrad
+James Fenimore Cooper
+Hart Crane
+Thomas Cranmer
+Daniel Defoe
+Charles Dickens
+Benjamin Disraeli
+John Donne
+John Dos Passos
+Frederick Douglass
+Theodore Dreiser
+John Dryden
+W. E. B. Du Bois
+Lord Dunsany
+Paul Laurence Dunbar
+George Eliot
+T. S. Eliot
+Ralph Waldo Emerson
+Henry Fielding
+Ian Fleming
+E. M. Forster
+Robert Frost
+Thomas Fuller
+John Galsworthy
+Elizabeth Gaskell
+Erle Stanley Gardner
+William Godwin
+Oliver Goldsmith
+George Gower
+Robert Graves
+Thomas Gray
+Graham Greene
+Robert Greene
+Richard Henry Dana Jr.
+Hamlin Garland
+George Herbert
+Ernest Hemingway
+H. Rider Haggard
+Thomas Hardy
+Bret Harte
+Nathaniel Hawthorne
+Thomas Heywood
+A. E. Housman
+Victor Hugo (English corpus via translations; omit if strictly original English)
+Aldous Huxley
+Thomas Huxley
+Henry James
+William James
+Henry David Thoreau
+Harriet Jacobs
+Jerome K. Jerome
+Ben Jonson
+Henry Kingsley
+Rudyard Kipling
+John Keats
+John Maynard Keynes
+Charles Lamb
+D. H. Lawrence
+T. E. Lawrence
+D. H. Lawrence
+Walter de la Mare
+Thomas Malory
+Thomas Malthus
+Herman Melville
+H. L. Mencken
+Thomas Middleton
+John Milton
+John Stuart Mill
+Edna St. Vincent Millay
+Nancy Mitford
+Marianne Moore
+Thomas More
+William Morris
+Somerset Maugham
+John Masefield
+Walter Pater
+Thomas Nashe
+Vladimir Nabokov (pre-1950 work in English is limited; omit if you want stricter)
+V. S. Naipaul (post-1950; omit — included only to flag)
+John Henry Newman
+Isaac Newton
+Florence Nightingale
+Frank Norris
+George Orwell
+Eugene O’Neill
+Wilfred Owen
+Thomas Paine
+Dorothy Parker
+Samuel Pepys
+Charles Sanders Peirce
+Beatrix Potter
+Alexander Pope
+Ezra Pound
+Vachel Lindsay
+Edgar Allan Poe
+Katherine Anne Porter
+J. B. Priestley
+Marcel Proust (English corpus via translations; omit if strictly original English)
+Samuel Richardson
+David Ricardo
+I. A. Richards
+Christina Rossetti
+Dante Gabriel Rossetti
+Bertrand Russell
+John Ruskin
+Edward Said (post-1950; omit — included only to flag)
+Saki (H. H. Munro)
+George Santayana
+Carl Sandburg
+Walter Scott
+Anna Sewell
+William Shakespeare
+George Bernard Shaw
+Percy Bysshe Shelley
+Philip Sidney
+Upton Sinclair
+Edith Sitwell
+Adam Smith
+Tobias Smollett
+John Steinbeck
+Robert Louis Stevenson
+Richard Steele
+Gertrude Stein
+Wallace Stevens
+Bram Stoker
+Harriet Beecher Stowe
+Laurence Sterne
+Lytton Strachey
+Jonathan Swift
+Alfred, Lord Tennyson
+Dylan Thomas
+Henry David Thoreau
+Anthony Trollope
+Mark Twain
+John Updike (post-1950; omit — included only to flag)
+Evelyn Waugh
+H. G. Wells
+Edith Wharton
+Walt Whitman
+Mary Wollstonecraft
+Virginia Woolf
+William Wordsworth
+Richard Wright
+W. B. Yeats
+Mary Shelley
+Arthur Conan Doyle
+Agatha Christie
+Dorothy L. Sayers
+P. G. Wodehouse
+C. S. Lewis
+J. R. R. Tolkien
+Arthur Machen
+Algernon Blackwood
+M. R. James
+Sheridan Le Fanu
+H. P. Lovecraft
+Olaf Stapledon
+E. R. Eddison
+George MacDonald
+A. A. Milne
+E. Nesbit
+Kenneth Grahame
+L. Frank Baum
+Howard Pyle
+Edgar Rice Burroughs
+Dashiell Hammett
+Raymond Chandler
+James M. Cain
+Rex Stout
+John Dickson Carr
+Ngaio Marsh
+Margery Allingham
+Josephine Tey
+Anna Katharine Green
+Mary Roberts Rinehart
+Sax Rohmer
+John Wesley
+Jonathan Edwards
+Cotton Mather
+Increase Mather
+Phillis Wheatley
+Edward Taylor
+Frederick Jackson Turner
+Edward Gibbon
+Thomas Babington Macaulay
+G. M. Trevelyan
+Arnold Toynbee
+Jacob Riis
+Ida Tarbell
+Booker T. Washington
+Ida B. Wells
+James Weldon Johnson
+Claude McKay
+Countee Cullen
+Langston Hughes
+Zora Neale Hurston
+Rebecca West
+Elizabeth Bowen
+Vita Sackville-West
+Dorothy Richardson
+Ford Madox Ford
+John Locke
+Thomas Hobbes
+David Hume
+George Berkeley
+Thomas Reid
+Francis Bacon
+Isaac Watts
+John Bunyan
+John Donne
+George Herbert
+Andrew Marvell
+Robert Herrick
+Edmund Spenser
+John Gower
+William Langland
+Julian of Norwich
+Margery Kempe
