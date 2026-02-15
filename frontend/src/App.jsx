@@ -1381,7 +1381,7 @@ export default function GutemGrep() {
                     }
                   }}
                 >
-                  gutemgrep
+                  in quire
                 </h1>
 
                 {isHome && (
