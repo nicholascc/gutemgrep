@@ -1283,7 +1283,7 @@ export default function GutemGrep() {
       />
       {!vectorsOpen && <VectorsTab count={vectors.length} onClick={() => setVectorsOpen(true)} />}
 
-      <div style={{ position: "relative", zIndex: 2, display: "flex", flexDirection: "column", alignItems: "center", minHeight: "100vh" }}>
+      <div style={{ position: "relative", zIndex: 2, display: "flex", flexDirection: "column", alignItems: "center", width: "100%", minHeight: "100vh" }}>
 
         {/* ── SEARCH + RESULTS ── */}
         {showSearch && (
