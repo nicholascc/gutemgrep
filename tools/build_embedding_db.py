@@ -188,6 +188,7 @@ def _iter_text_files(text_dir: Path) -> Iterable[tuple[int, Path]]:
 def _create_schema(conn: sqlite3.Connection, *, table: str, overwrite: bool) -> None:
     if overwrite:
         conn.execute(f"DROP TABLE IF EXISTS {table}")
+        conn.execute("DROP TABLE IF EXISTS embedded_books")
     conn.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {table} (
@@ -202,6 +203,14 @@ def _create_schema(conn: sqlite3.Connection, *, table: str, overwrite: bool) -> 
         """
     )
     conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_book_id ON {table}(book_id)")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS embedded_books (
+          book_id INTEGER PRIMARY KEY,
+          completed_at TEXT NOT NULL
+        )
+        """
+    )
     conn.commit()
 
 
@@ -275,11 +284,28 @@ def main() -> None:
         help="Max embedding batches in flight; 0 defaults to 2*concurrency.",
     )
     parser.add_argument("--max-books", type=int, default=0, help="0 means no limit.")
+    parser.add_argument(
+        "--checkpoint-frequency",
+        type=int,
+        default=0,
+        help="0 means no periodic checkpoint; otherwise checkpoint WAL every N completed books.",
+    )
+    parser.add_argument(
+        "--resume",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Resume by skipping books already recorded in embedded_books (default: true).",
+    )
     parser.add_argument("--min-tokens", type=int, default=50)
     parser.add_argument("--min-chars", type=int, default=1)
     parser.add_argument("--max-paragraphs", type=int, default=0, help="0 means no limit.")
     parser.add_argument("--overwrite", action="store_true", help="Drop and recreate the embeddings table.")
     args = parser.parse_args()
+
+    resume = True if args.resume is None else bool(args.resume)
+
+    if args.overwrite and (args.resume is True):
+        print("Warning: --overwrite implies a fresh build; --resume will be ignored.", flush=True)
 
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
@@ -309,6 +335,7 @@ def main() -> None:
         min_tokens = max(1, int(args.min_tokens))
         min_chars = max(1, int(args.min_chars))
         max_paragraphs = max(0, int(args.max_paragraphs))
+        checkpoint_frequency = max(0, int(args.checkpoint_frequency))
 
         max_books = max(0, int(args.max_books))
         text_files = list(_iter_text_files(text_dir))
@@ -318,21 +345,86 @@ def main() -> None:
         if total_books == 0:
             raise SystemExit(f"No PG*_text.txt files found in {text_dir}.")
 
-        batch: list[ParagraphRow] = []
         inserted = 0
         seen = 0
         next_embed_id = 1
 
+        start_time = time.monotonic()
+        last_progress_print_time = 0.0
+        last_rate_time = start_time
+        last_rate_books_done = 0
+        rate_s_per_book: float | None = None
+
+        if not args.overwrite and resume:
+            row = conn.execute(f"SELECT COALESCE(MAX(embed_id), 0) FROM {args.table}").fetchone()
+            if row is not None:
+                next_embed_id = max(1, int(row[0]) + 1)
+
+            embedded_books_count = conn.execute("SELECT COUNT(*) FROM embedded_books").fetchone()
+            if embedded_books_count is not None and int(embedded_books_count[0]) == 0:
+                conn.execute(
+                    f"""
+                    INSERT OR IGNORE INTO embedded_books (book_id, completed_at)
+                    SELECT DISTINCT book_id, datetime('now')
+                    FROM {args.table}
+                    WHERE book_id IS NOT NULL
+                    """
+                )
+                conn.commit()
+
+            embedded_books_count = conn.execute("SELECT COUNT(*) FROM embedded_books").fetchone()
+            already_done = int(embedded_books_count[0]) if embedded_books_count is not None else 0
+            print(
+                f"Resuming: {already_done}/{total_books} books already completed; next embed_id={next_embed_id}",
+            )
+
         # Embed + insert: optionally in parallel (embedding requests only; SQLite writes stay single-threaded).
+        def _format_rate() -> str:
+            nonlocal last_rate_time, last_rate_books_done, rate_s_per_book
+            now = time.monotonic()
+            # Update rolling estimate every ~5 books (or when called after a skip/finish).
+            if books_done - last_rate_books_done >= 5:
+                dt = now - last_rate_time
+                db = books_done - last_rate_books_done
+                if dt > 0 and db > 0:
+                    inst = dt / db
+                    if rate_s_per_book is None:
+                        rate_s_per_book = inst
+                    else:
+                        # Exponential moving average for stability.
+                        alpha = 0.2
+                        rate_s_per_book = alpha * inst + (1 - alpha) * rate_s_per_book
+                last_rate_time = now
+                last_rate_books_done = books_done
+
+            if rate_s_per_book is None or books_done == 0:
+                return ""
+            return f" ({rate_s_per_book:.1f}s/book)"
+
+        def _print_progress(*, force: bool = False) -> None:
+            nonlocal last_progress_print_time
+            now = time.monotonic()
+            if not force and (now - last_progress_print_time) < 0.5:
+                return
+            last_progress_print_time = now
+
+            skipped_part = f" (skipped {books_skipped})" if books_skipped else ""
+            rate_part = _format_rate()
+            print(
+                f"Books {books_done}/{total_books}{skipped_part}{rate_part} | Embedded {inserted} chunks",
+                end="\r",
+            )
+
         def insert_one_payload(payload: list[tuple]) -> None:
             nonlocal inserted
             _insert_payload(conn, table=args.table, payload=payload)
             conn.commit()
             inserted += len(payload)
-            print(f"Books {books_done}/{total_books} | Embedded {inserted} paragraphs", end="\r")
+            _print_progress(force=False)
 
         inflight: set[concurrent.futures.Future[list[tuple]]] = set()
         books_done = 0
+        books_skipped = 0
 
         def drain_one(*, pool: concurrent.futures.Executor) -> None:
             done, _ = concurrent.futures.wait(inflight, return_when=concurrent.futures.FIRST_COMPLETED)
@@ -363,8 +455,28 @@ def main() -> None:
 
         try:
             for book_id, path in text_files:
+                if resume and not args.overwrite:
+                    completed = conn.execute(
+                        "SELECT 1 FROM embedded_books WHERE book_id = ? LIMIT 1",
+                        (int(book_id),),
+                    ).fetchone()
+                    if completed is not None:
+                        books_done += 1
+                        books_skipped += 1
+                        if checkpoint_frequency and (books_done % checkpoint_frequency == 0):
+                            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                        _print_progress(force=True)
+                        continue
+
                 title = titles.get(book_id)
 
+                if resume and not args.overwrite:
+                    # If we previously crashed mid-book, remove any partial rows for this book
+                    # (we only consider a book complete if it's in embedded_books).
+                    conn.execute(f"DELETE FROM {args.table} WHERE book_id = ?", (int(book_id),))
+                    conn.commit()
+
+                batch: list[ParagraphRow] = []
                 pending: ParagraphRow | None = None
                 prev_embed_id: int | None = None
 
@@ -409,34 +521,43 @@ def main() -> None:
                             prev_embed_id=pending.prev_embed_id,
                             next_embed_id=None,
                             book_title=pending.book_title,
-                            book_id=pending.book_id,
-                        )
+                        book_id=pending.book_id,
                     )
-                    if len(batch) >= batch_size:
-                        submit_batch(pool=pool, rows=batch)
-                        batch = []
+                )
+                if batch:
+                    submit_batch(pool=pool, rows=batch)
+                    batch = []
+
+                if pool is not None and inflight:
+                    drain_all(pool=pool)
 
                 books_done += 1
-                print(f"Books {books_done}/{total_books} | Embedded {inserted} paragraphs", end="\r")
+                conn.execute(
+                    "INSERT OR REPLACE INTO embedded_books (book_id, completed_at) VALUES (?, datetime('now'))",
+                    (int(book_id),),
+                )
+                conn.commit()
+
+                if checkpoint_frequency and (books_done % checkpoint_frequency == 0):
+                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+                _print_progress(force=True)
 
                 if max_paragraphs and seen >= max_paragraphs:
                     break
-
-            if batch:
-                submit_batch(pool=pool, rows=batch)
-                batch = []
-
-            if pool is not None:
-                drain_all(pool=pool)
         finally:
             if pool is not None:
                 pool.shutdown(wait=False, cancel_futures=True)
 
-        if inserted == 0:
-            raise SystemExit(f"No paragraphs found in {text_dir}.")
+        total_rows = conn.execute(f"SELECT COUNT(*) FROM {args.table}").fetchone()
+        total_rows_int = int(total_rows[0]) if total_rows is not None else 0
+        if total_rows_int == 0:
+            raise SystemExit(f"No chunks found in {text_dir}.")
 
     print()
-    print(f"OK: wrote {inserted} rows to {out_db} (table: {args.table}, model: {args.model})")
+    print(
+        f"OK: added {inserted} chunks; db has {total_rows_int} rows at {out_db} (table: {args.table}, model: {args.model})"
+    )
 
 
 if __name__ == "__main__":
