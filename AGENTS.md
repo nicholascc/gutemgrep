@@ -22,3 +22,4 @@
 
 ## Nix
 - Some (not all) devs use Nix. Add general packages/requirements to `flake.nix`.
+- Dev environments vary: some users are on macOS, some on Ubuntu, and some on NixOS. `flake.nix` is only used by the NixOS users; non-Nix users should not be expected to use it.
