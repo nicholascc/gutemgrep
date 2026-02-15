@@ -27,6 +27,13 @@ class ParagraphRow:
     book_title: Optional[str]
     book_id: Optional[int]
 
+
+@dataclass(frozen=True)
+class EmbedResult:
+    payload: list[tuple]
+    total_tokens: int
+    embed_s: float
+
 _thread_local = threading.local()
 
 
@@ -124,20 +131,27 @@ def _load_titles(metadata_csv: Path) -> dict[int, str]:
     return by_book_id
 
 
-def _embed_batch(*, api_key: str, model: str, texts: list[str]) -> list[np.ndarray]:
+def _embed_batch(*, api_key: str, model: str, task: str, texts: list[str]) -> tuple[list[np.ndarray], int]:
     if any((not isinstance(t, str)) or (not t.strip()) for t in texts):
         raise ValueError("Embedding batch contains empty text.")
 
     resp = _get_requests_session().post(
-        "https://api.openai.com/v1/embeddings",
+        "https://api.jina.ai/v1/embeddings",
         headers={"Authorization": f"Bearer {api_key}"},
-        json={"model": model, "input": texts, "encoding_format": "float"},
+        json={"model": model, "task": task, "input": texts, "truncate": True},
         timeout=60,
     )
     if resp.status_code >= 400:
-        raise RuntimeError(f"OpenAI embeddings error ({resp.status_code}): {resp.text}")
+        raise RuntimeError(f"Jina embeddings error ({resp.status_code}): {resp.text}")
 
     data = resp.json()
+    total_tokens_int = 0
+    usage = data.get("usage") or {}
+    if isinstance(usage, dict) and "total_tokens" in usage:
+        try:
+            total_tokens_int = int(usage["total_tokens"])
+        except Exception:
+            total_tokens_int = 0
     items = data.get("data") or []
     if not isinstance(items, list) or len(items) != len(texts):
         raise RuntimeError(f"Unexpected embeddings response shape: {data}")
@@ -150,21 +164,22 @@ def _embed_batch(*, api_key: str, model: str, texts: list[str]) -> list[np.ndarr
         if not isinstance(embedding, list) or not embedding:
             raise RuntimeError("Missing embedding in response.")
         out.append(np.asarray(embedding, dtype=np.float32))
-    return out
+    return out, total_tokens_int
 
 
 def _retry_embed_batch(
     *,
     api_key: str,
     model: str,
+    task: str,
     texts: list[str],
     max_retries: int = 6,
-) -> list[np.ndarray]:
+) -> tuple[list[np.ndarray], int]:
     delay_s = 1.0
     last_err: Exception | None = None
     for attempt in range(max_retries + 1):
         try:
-            return _embed_batch(api_key=api_key, model=model, texts=texts)
+            return _embed_batch(api_key=api_key, model=model, task=task, texts=texts)
         except Exception as e:
             last_err = e
             msg = str(e)
@@ -220,15 +235,18 @@ def _embed_and_insert(
     table: str,
     api_key: str,
     model: str,
+    task: str,
     rows: list[ParagraphRow],
 ) -> None:
-    payload = _embed_payload(api_key=api_key, model=model, rows=rows)
-    _insert_payload(conn, table=table, payload=payload)
+    res = _embed_payload(api_key=api_key, model=model, task=task, rows=rows)
+    _insert_payload(conn, table=table, payload=res.payload)
 
 
-def _embed_payload(*, api_key: str, model: str, rows: list[ParagraphRow]) -> list[tuple]:
+def _embed_payload(*, api_key: str, model: str, task: str, rows: list[ParagraphRow]) -> EmbedResult:
     texts = [r.paragraph_text for r in rows]
-    vecs = _retry_embed_batch(api_key=api_key, model=model, texts=texts)
+    t0 = time.monotonic()
+    vecs, total_tokens = _retry_embed_batch(api_key=api_key, model=model, task=task, texts=texts)
+    embed_s = time.monotonic() - t0
 
     payload = []
     for r, v in zip(rows, vecs, strict=True):
@@ -243,7 +261,7 @@ def _embed_payload(*, api_key: str, model: str, rows: list[ParagraphRow]) -> lis
                 int(r.book_id) if r.book_id is not None else None,
             )
         )
-    return payload
+    return EmbedResult(payload=payload, total_tokens=int(total_tokens), embed_s=float(embed_s))
 
 
 def _insert_payload(conn: sqlite3.Connection, *, table: str, payload: list[tuple]) -> None:
@@ -264,12 +282,13 @@ def _insert_payload(conn: sqlite3.Connection, *, table: str, payload: list[tuple
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build embedding.db from Gutenberg text/ files.")
+    parser = argparse.ArgumentParser(description="Build embedding.db from Gutenberg text/ files (Jina embeddings API).")
     parser.add_argument("--text-dir", default="gutenberg/data/text", help="Directory of PG*_text.txt files.")
     parser.add_argument("--metadata-csv", default="gutenberg/metadata/metadata.csv", help="Metadata CSV with titles.")
     parser.add_argument("--out-db", default="embedding.db", help="Output SQLite path.")
     parser.add_argument("--table", default=os.environ.get("EMBEDDINGS_TABLE", "embeddings"))
-    parser.add_argument("--model", default=os.environ.get("OPENAI_EMBED_MODEL", "text-embedding-3-small"))
+    parser.add_argument("--model", default=os.environ.get("JINA_EMBED_MODEL", "jina-embeddings-v3"))
+    parser.add_argument("--task", default=os.environ.get("JINA_EMBED_TASK", "text-matching"))
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument(
         "--concurrency",
@@ -296,6 +315,7 @@ def main() -> None:
         default=None,
         help="Resume by skipping books already recorded in embedded_books (default: true).",
     )
+    parser.add_argument("--timing", action="store_true", help="Print timing breakdown at end.")
     parser.add_argument("--min-tokens", type=int, default=50)
     parser.add_argument("--min-chars", type=int, default=1)
     parser.add_argument("--max-paragraphs", type=int, default=0, help="0 means no limit.")
@@ -307,9 +327,9 @@ def main() -> None:
     if args.overwrite and (args.resume is True):
         print("Warning: --overwrite implies a fresh build; --resume will be ignored.", flush=True)
 
-    api_key = os.environ.get("OPENAI_API_KEY")
+    api_key = os.environ.get("JINA_API_KEY")
     if not api_key:
-        raise SystemExit("Missing OPENAI_API_KEY.")
+        raise SystemExit("Missing JINA_API_KEY.")
 
     root = Path(__file__).resolve().parents[1]
     text_dir = (root / args.text_dir).resolve()
@@ -336,6 +356,7 @@ def main() -> None:
         min_chars = max(1, int(args.min_chars))
         max_paragraphs = max(0, int(args.max_paragraphs))
         checkpoint_frequency = max(0, int(args.checkpoint_frequency))
+        task = str(args.task or "text-matching")
 
         max_books = max(0, int(args.max_books))
         text_files = list(_iter_text_files(text_dir))
@@ -354,6 +375,10 @@ def main() -> None:
         last_rate_time = start_time
         last_rate_books_done = 0
         rate_s_per_book: float | None = None
+        total_tokens = 0
+        total_embed_s = 0.0
+        total_insert_s = 0.0
+        total_batches = 0
 
         if not args.overwrite and resume:
             row = conn.execute(f"SELECT COALESCE(MAX(embed_id), 0) FROM {args.table}").fetchone()
@@ -408,21 +433,27 @@ def main() -> None:
                 return
             last_progress_print_time = now
 
+            elapsed_s = now - start_time
             skipped_part = f" (skipped {books_skipped})" if books_skipped else ""
             rate_part = _format_rate()
             print(
-                f"Books {books_done}/{total_books}{skipped_part}{rate_part} | Embedded {inserted} chunks",
+                f"{elapsed_s:7.1f}s | Books {books_done}/{total_books}{skipped_part}{rate_part} | Embedded {inserted} chunks | Tokens {total_tokens}",
                 end="\r",
             )
 
-        def insert_one_payload(payload: list[tuple]) -> None:
-            nonlocal inserted
-            _insert_payload(conn, table=args.table, payload=payload)
+        def insert_one_payload(res: EmbedResult) -> None:
+            nonlocal inserted, total_tokens, total_embed_s, total_insert_s, total_batches
+            t0 = time.monotonic()
+            _insert_payload(conn, table=args.table, payload=res.payload)
             conn.commit()
-            inserted += len(payload)
+            total_insert_s += time.monotonic() - t0
+            inserted += len(res.payload)
+            total_tokens += int(res.total_tokens)
+            total_embed_s += float(res.embed_s)
+            total_batches += 1
             _print_progress(force=False)
 
-        inflight: set[concurrent.futures.Future[list[tuple]]] = set()
+        inflight: set[concurrent.futures.Future[EmbedResult]] = set()
         books_done = 0
         books_skipped = 0
 
@@ -441,9 +472,9 @@ def main() -> None:
             if not rows:
                 return
             if pool is None:
-                insert_one_payload(_embed_payload(api_key=api_key, model=args.model, rows=rows))
+                insert_one_payload(_embed_payload(api_key=api_key, model=args.model, task=task, rows=rows))
                 return
-            inflight.add(pool.submit(_embed_payload, api_key=api_key, model=args.model, rows=rows))
+            inflight.add(pool.submit(_embed_payload, api_key=api_key, model=args.model, task=task, rows=rows))
             if len(inflight) >= max_inflight:
                 drain_one(pool=pool)
 
@@ -521,9 +552,9 @@ def main() -> None:
                             prev_embed_id=pending.prev_embed_id,
                             next_embed_id=None,
                             book_title=pending.book_title,
-                        book_id=pending.book_id,
+                            book_id=pending.book_id,
+                        )
                     )
-                )
                 if batch:
                     submit_batch(pool=pool, rows=batch)
                     batch = []
@@ -556,8 +587,21 @@ def main() -> None:
 
     print()
     print(
-        f"OK: added {inserted} chunks; db has {total_rows_int} rows at {out_db} (table: {args.table}, model: {args.model})"
+        f"OK: added {inserted} chunks; db has {total_rows_int} rows at {out_db} (table: {args.table}, model: {args.model}, task: {args.task})"
     )
+    if args.timing:
+        wall_s = time.monotonic() - start_time
+        embed_avg_ms = (1000.0 * total_embed_s / total_batches) if total_batches else 0.0
+        insert_avg_ms = (1000.0 * total_insert_s / total_batches) if total_batches else 0.0
+        tok_per_s = (float(total_tokens) / wall_s) if wall_s > 0 else 0.0
+        print(
+            "Timing: "
+            f"wall={wall_s:.1f}s, "
+            f"batches={total_batches}, "
+            f"embed_sum={total_embed_s:.1f}s (avg {embed_avg_ms:.0f}ms/batch), "
+            f"insert_sum={total_insert_s:.1f}s (avg {insert_avg_ms:.0f}ms/batch), "
+            f"tokens={total_tokens} ({tok_per_s:.1f} tok/s)"
+        )
 
 
 if __name__ == "__main__":
