@@ -247,12 +247,13 @@ def _is_notable(author: str, notable: set[str], single_tokens: set[str]) -> bool
 
 def _load_metadata(
     metadata_csv: Path, *, notable: set[str], single_tokens: set[str]
-) -> tuple[dict[int, str], dict[int, str], dict[int, int], set[int]]:
+) -> tuple[dict[int, str], dict[int, str], dict[int, int], dict[int, str], set[int]]:
     if not metadata_csv.exists():
-        return {}, {}, {}, set()
+        return {}, {}, {}, {}, set()
     by_book_id: dict[int, str] = {}
     authors_by_id: dict[int, str] = {}
     downloads_by_id: dict[int, int] = {}
+    languages_by_id: dict[int, str] = {}
     notable_book_ids: set[int] = set()
     with metadata_csv.open("r", encoding="utf-8", newline="") as f:
         r = csv.DictReader(f)
@@ -276,9 +277,12 @@ def _load_metadata(
             author = (row.get("author") or "").strip()
             if author:
                 authors_by_id[book_id] = author
+            language = (row.get("language") or "").strip()
+            if language:
+                languages_by_id[book_id] = language
             if author and _is_notable(author, notable, single_tokens):
                 notable_book_ids.add(book_id)
-    return by_book_id, authors_by_id, downloads_by_id, notable_book_ids
+    return by_book_id, authors_by_id, downloads_by_id, languages_by_id, notable_book_ids
 
 
 def _embed_batch(*, api_key: str, model: str, task: str, texts: list[str]) -> tuple[list[np.ndarray], int]:
@@ -354,6 +358,7 @@ def _create_schema(conn: sqlite3.Connection, *, table: str, overwrite: bool) -> 
     if overwrite:
         conn.execute(f"DROP TABLE IF EXISTS {table}")
         conn.execute("DROP TABLE IF EXISTS embedded_books")
+        conn.execute("DROP TABLE IF EXISTS book_metadata")
     conn.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {table} (
@@ -376,8 +381,55 @@ def _create_schema(conn: sqlite3.Connection, *, table: str, overwrite: bool) -> 
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS book_metadata (
+          book_id INTEGER PRIMARY KEY,
+          book_title TEXT,
+          author TEXT,
+          language TEXT,
+          downloads INTEGER
+        )
+        """
+    )
     conn.commit()
 
+
+def _upsert_book_metadata(
+    conn: sqlite3.Connection,
+    *,
+    book_ids: set[int],
+    titles: dict[int, str],
+    authors_by_id: dict[int, str],
+    downloads_by_id: dict[int, int],
+    languages_by_id: dict[int, str],
+) -> None:
+    rows = []
+    for book_id in sorted(book_ids):
+        rows.append(
+            (
+                int(book_id),
+                titles.get(book_id),
+                authors_by_id.get(book_id),
+                languages_by_id.get(book_id),
+                int(downloads_by_id.get(book_id)) if book_id in downloads_by_id else None,
+            )
+        )
+    if not rows:
+        return
+    conn.executemany(
+        """
+        INSERT OR REPLACE INTO book_metadata (
+          book_id,
+          book_title,
+          author,
+          language,
+          downloads
+        ) VALUES (?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+    conn.commit()
 
 def _embed_and_insert(
     conn: sqlite3.Connection,
@@ -496,7 +548,7 @@ def main() -> None:
     else:
         print(f"Warning: missing authors list: {authors_list_path} (continuing without notables)", flush=True)
         notable, single_tokens = set(), set()
-    titles, authors_by_id, downloads_by_id, notable_book_ids = _load_metadata(
+    titles, authors_by_id, downloads_by_id, languages_by_id, notable_book_ids = _load_metadata(
         metadata_csv, notable=notable, single_tokens=single_tokens
     )
 
@@ -519,6 +571,14 @@ def main() -> None:
 
         max_books = max(0, int(args.max_books))
         text_files = list(_iter_text_files(text_dir))
+        _upsert_book_metadata(
+            conn,
+            book_ids={book_id for book_id, _ in text_files},
+            titles=titles,
+            authors_by_id=authors_by_id,
+            downloads_by_id=downloads_by_id,
+            languages_by_id=languages_by_id,
+        )
         top_popular_ids: set[int] = set()
         if downloads_by_id:
             by_popularity = sorted(
