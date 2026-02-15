@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>The Index</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=Courier+Prime:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --cream: #faf8f3;
+            --ink: #1a1612;
+            --forest: #2d4a3e;
+            --moss: #4a6b5a;
+            --shadow: rgba(26, 22, 18, 0.15);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'EB Garamond', 'Garamond', serif;
+            background: var(--cream);
+            color: var(--ink);
+            overflow-x: hidden;
+            min-height: 100vh;
+            position: relative;
+            transition: background-color 0.8s ease, color 0.8s ease;
+        }
+
+        /* Background illustration container */
+        .background-illustration {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+            opacity: 0.35;
+            transition: opacity 0.8s ease, filter 0.8s ease;
+            pointer-events: none;
+        }
+
+        /* Placeholder for background image - replace with actual illustration */
+        .background-illustration::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-image: url('monastery.png');
+            background-size: 100% auto;
+            background-position: center bottom;
+            background-repeat: no-repeat;
+        }
+
+        /* Stars layer - hidden by default */
+        .stars {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 50vh; /* Only top half of screen */
+            z-index: 1;
+            opacity: 0;
+            transition: opacity 1s ease;
+            pointer-events: none;
+        }
+
+        .star {
+            position: absolute;
+            width: 2px;
+            height: 2px;
+            background: white;
+            border-radius: 50%;
+            opacity: 0;
+            animation: twinkle 3s ease-in-out infinite;
+        }
+
+        @keyframes twinkle {
+            0%, 100% { opacity: 0.4; }
+            50% { opacity: 1; }
+        }
+
+        /* Night mode state */
+        body.night-mode {
+            background: #0a0f0d;
+            color: var(--cream);
+        }
+
+        body.night-mode .background-illustration {
+            opacity: 0.15;
+            filter: invert(1) hue-rotate(180deg);
+        }
+
+        body.night-mode .stars {
+            opacity: 1;
+        }
+
+        body.night-mode .logo {
+            color: var(--cream);
+        }
+
+        body.night-mode .search-input {
+            background: rgba(20, 25, 23, 0.8);
+            border-color: rgba(250, 248, 243, 0.2);
+            color: var(--cream);
+        }
+
+        body.night-mode .search-input::placeholder {
+            color: rgba(250, 248, 243, 0.4);
+        }
+
+        body.night-mode .search-button {
+            background: var(--moss);
+            border-color: rgba(74, 107, 90, 0.3);
+            color: var(--cream);
+        }
+
+        /* Main content */
+        .hero-container {
+            position: relative;
+            z-index: 2;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 2rem;
+        }
+
+        /* Logo */
+        .logo {
+            font-size: clamp(3rem, 8vw, 6rem);
+            font-weight: 500;
+            letter-spacing: 0.02em;
+            margin-bottom: 3rem;
+            color: var(--ink);
+            text-align: center;
+            line-height: 1.1;
+            animation: fadeIn 1.2s ease-out;
+            transition: color 0.8s ease;
+        }
+
+        .logo .initial {
+            font-size: 1.3em;
+            color: var(--forest);
+            font-weight: 600;
+            transition: color 0.8s ease;
+        }
+
+        /* Search container */
+        .search-container {
+            width: 100%;
+            max-width: 700px;
+            animation: fadeIn 1.4s ease-out 0.3s backwards;
+            position: relative;
+        }
+
+        .search-form {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 1.5rem;
+        }
+
+        .search-input {
+            width: 100%;
+            padding: 1.75rem 2rem;
+            font-family: 'EB Garamond', Georgia, serif;
+            font-size: 1.5rem;
+            background: rgba(240, 237, 230, 0.95);
+            border: 1px solid rgba(26, 22, 18, 0.15);
+            color: var(--ink);
+            border-radius: 50px;
+            transition: all 0.3s ease, background-color 0.8s ease, border-color 0.8s ease, color 0.8s ease;
+            box-shadow: 0 8px 24px var(--shadow);
+            font-style: italic;
+            text-align: center;
+        }
+
+        .search-input:focus {
+            outline: none;
+            border-color: rgba(45, 74, 62, 0.25);
+            background: rgba(235, 230, 220, 0.98);
+            box-shadow: 
+                0 12px 32px rgba(45, 74, 62, 0.15),
+                0 0 0 4px rgba(45, 74, 62, 0.08);
+            transform: translateY(-2px);
+            text-align: left;
+        }
+
+        .search-input::placeholder {
+            color: rgba(26, 22, 18, 0.35);
+            transition: color 0.8s ease;
+        }
+
+        .search-button {
+            padding: 1.25rem 3.5rem;
+            background: var(--forest);
+            color: var(--cream);
+            border: 1px solid rgba(45, 74, 62, 0.3);
+            font-family: 'Courier Prime', monospace;
+            font-size: 0.875rem;
+            text-transform: uppercase;
+            letter-spacing: 0.25em;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            border-radius: 50px;
+            font-weight: 700;
+            box-shadow: 0 6px 20px rgba(45, 74, 62, 0.25);
+        }
+
+        .search-button:hover {
+            background: #3d5a52;
+            border-color: rgba(61, 90, 82, 0.3);
+            transform: translateY(-3px);
+            box-shadow: 0 10px 30px rgba(45, 74, 62, 0.35);
+        }
+
+        .search-button:active {
+            transform: translateY(-1px);
+        }
+
+
+
+        /* Additional content section */
+        .additional-content {
+            position: relative;
+            z-index: 2;
+            min-height: 100vh;
+            padding: 6rem 2rem;
+            max-width: 1200px;
+            margin: 0 auto;
+            opacity: 0;
+            transition: opacity 0.6s ease;
+        }
+
+        .additional-content.visible {
+            opacity: 1;
+        }
+
+        .content-section {
+            margin-bottom: 5rem;
+        }
+
+        .section-title {
+            font-size: 2rem;
+            margin-bottom: 2rem;
+            color: var(--forest);
+            font-weight: 500;
+            transition: color 0.8s ease;
+        }
+
+        body.night-mode .section-title {
+            color: var(--moss);
+        }
+
+        .section-content {
+            font-size: 1.25rem;
+            line-height: 1.8;
+            max-width: 800px;
+        }
+
+        .section-content p {
+            margin-bottom: 1.5rem;
+        }
+
+        /* Examples grid */
+        .examples-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 2rem;
+            margin-top: 2rem;
+        }
+
+        .example-card {
+            padding: 2rem;
+            border: 2px solid var(--ink);
+            background: rgba(250, 248, 243, 0.9);
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        body.night-mode .example-card {
+            background: rgba(250, 248, 243, 0.05);
+            border-color: var(--cream);
+        }
+
+        .example-card:hover {
+            transform: translateX(-4px) translateY(-4px);
+            box-shadow: 4px 4px 0 var(--forest);
+        }
+
+        body.night-mode .example-card:hover {
+            box-shadow: 4px 4px 0 var(--moss);
+        }
+
+        .example-text {
+            font-size: 1.125rem;
+            font-style: italic;
+            color: var(--ink);
+            transition: color 0.8s ease;
+        }
+
+        body.night-mode .example-text {
+            color: var(--cream);
+        }
+
+        /* Animations */
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .logo {
+                font-size: clamp(2rem, 10vw, 3.5rem);
+                margin-bottom: 2rem;
+            }
+
+            .search-input {
+                padding: 1.25rem 1.5rem;
+                font-size: 1.25rem;
+            }
+
+            .search-button {
+                padding: 1rem 2.5rem;
+            }
+
+            .additional-content {
+                padding: 4rem 1.5rem;
+            }
+
+            .examples-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* Loading state */
+        .search-button.loading {
+            pointer-events: none;
+            opacity: 0.6;
+        }
+
+        .search-button.loading::after {
+            content: '';
+            position: absolute;
+            width: 16px;
+            height: 16px;
+            top: 50%;
+            left: 50%;
+            margin-left: -8px;
+            margin-top: -8px;
+            border: 2px solid var(--cream);
+            border-radius: 50%;
+            border-top-color: transparent;
+            animation: spin 0.7s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <!-- Background illustration layer -->
+    <div class="background-illustration"></div>
+
+    <!-- Stars layer -->
+    <div class="stars"></div>
+
+    <!-- Hero section -->
+    <div class="hero-container">
+        <h1 class="logo"><span class="initial">T</span>he Index</h1>
+        
+        <div class="search-container">
+            <form action="/query" method="POST" class="search-form">
+                <input 
+                    type="text" 
+                    name="query"
+                    id="search-input"
+                    class="search-input" 
+                    placeholder="passages concerning the sea by moonlight..."
+                    autocomplete="off"
+                    required
+                >
+                <button type="submit" class="search-button">Search</button>
+            </form>
+        </div>
+
+    </div>
+
+    <!-- Additional content (visible on scroll) -->
+    <div class="additional-content">
+        <div class="content-section">
+            <h2 class="section-title">About The Index</h2>
+            <div class="section-content">
+                <p>
+                    A semantic search engine over Project Gutenberg's public domain library. Every paragraph has been embedded as a vector, creating a searchable mathematical space of literary language.
+                </p>
+                <p>
+                    Search by meaning, not keywords. Ask for "passages about the ocean at night" and discover descriptions that match the mood and content, regardless of exact phrasing.
+                </p>
+            </div>
+        </div>
+
+        <div class="content-section">
+            <h2 class="section-title">Try These</h2>
+            <div class="examples-grid">
+                <div class="example-card" data-query="descriptions of storms and tempests">
+                    <div class="example-text">descriptions of storms and tempests</div>
+                </div>
+                <div class="example-card" data-query="passages of extreme philosophical pretension">
+                    <div class="example-text">passages of extreme philosophical pretension</div>
+                </div>
+                <div class="example-card" data-query="moments of sudden revelation">
+                    <div class="example-text">moments of sudden revelation</div>
+                </div>
+                <div class="example-card" data-query="declarations of love in Victorian novels">
+                    <div class="example-text">declarations of love in Victorian novels</div>
+                </div>
+                <div class="example-card" data-query="villainous monologues">
+                    <div class="example-text">villainous monologues</div>
+                </div>
+                <div class="example-card" data-query="vague, dreamlike descriptions">
+                    <div class="example-text">vague, dreamlike descriptions</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const searchInput = document.getElementById('search-input');
+        const body = document.body;
+        const starsContainer = document.querySelector('.stars');
+        const additionalContent = document.querySelector('.additional-content');
+        let starsGenerated = false;
+
+        // Generate stars when needed
+        function generateStars() {
+            if (starsGenerated) return;
+            
+            const starCount = 100;
+            for (let i = 0; i < starCount; i++) {
+                const star = document.createElement('div');
+                star.className = 'star';
+                star.style.left = Math.random() * 100 + '%';
+                star.style.top = Math.random() * 100 + '%';
+                star.style.animationDelay = Math.random() * 3 + 's';
+                
+                // Vary star sizes (2-5px, with occasional larger stars)
+                const size = Math.random() * 3 + 2;
+                star.style.width = size + 'px';
+                star.style.height = size + 'px';
+                
+                // Add glow to larger stars
+                if (size > 3.5) {
+                    star.style.boxShadow = '0 0 4px rgba(255, 255, 255, 0.8)';
+                }
+                
+                starsContainer.appendChild(star);
+            }
+            starsGenerated = true;
+        }
+
+        // Toggle night mode when user starts typing (once activated, stays on)
+        let hasTyped = false;
+        searchInput.addEventListener('input', function() {
+            if (!hasTyped && this.value.length > 0) {
+                hasTyped = true;
+                generateStars();
+                body.classList.add('night-mode');
+            }
+        });
+
+        // Show additional content on scroll
+        const observer = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    additionalContent.classList.add('visible');
+                }
+            });
+        }, { threshold: 0.1 });
+
+        observer.observe(additionalContent);
+
+        // Example card interactions
+        document.querySelectorAll('.example-card').forEach(card => {
+            card.addEventListener('click', function() {
+                const query = this.getAttribute('data-query');
+                searchInput.value = query;
+                searchInput.focus();
+                
+                // Trigger night mode
+                if (!hasTyped) {
+                    hasTyped = true;
+                    generateStars();
+                    body.classList.add('night-mode');
+                }
+                
+                // Scroll to search
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+            });
+        });
+
+        // Form submission
+        const form = document.querySelector('.search-form');
+        const button = document.querySelector('.search-button');
+        
+        form.addEventListener('submit', function(e) {
+            button.classList.add('loading');
+            button.textContent = '';
+        });
+    </script>
+</body>
+</html>
