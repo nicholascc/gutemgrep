@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import csv
 import os
 import re
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable, Iterator, Optional
 
 import numpy as np
 import requests
+
+_TOKEN_RE = re.compile(r"\S+")
 
 
 @dataclass(frozen=True)
@@ -23,10 +27,81 @@ class ParagraphRow:
     book_title: Optional[str]
     book_id: Optional[int]
 
+_thread_local = threading.local()
 
-def _split_paragraphs(text: str) -> list[str]:
-    parts = re.split(r"\n\s*\n+", text)
-    return [p.strip() for p in parts if p.strip()]
+
+def _get_requests_session() -> requests.Session:
+    session = getattr(_thread_local, "session", None)
+    if session is None:
+        session = requests.Session()
+        _thread_local.session = session
+    return session
+
+
+def _count_tokens(text: str) -> int:
+    return sum(1 for _ in _TOKEN_RE.finditer(text))
+
+
+def _iter_paragraphs_from_file(path: Path, *, min_tokens: int, min_chars: int) -> Iterator[str]:
+    """
+    Chunking algorithm:
+    - Treat "paragraphs" as blocks separated by blank lines (i.e., double-newlines in the source).
+    - Build a chunk by concatenating paragraphs until the chunk has at least `min_tokens` tokens.
+    - Once the threshold is reached, end the chunk at the next paragraph boundary.
+    """
+    chunk_paras: list[str] = []
+    chunk_tokens = 0
+    prev_chunk: str | None = None
+
+    para_lines: list[str] = []
+
+    def flush_paragraph() -> Optional[str]:
+        if not para_lines:
+            return None
+        # Processed Gutenberg text is often fixed-width; unwrap wrapped lines.
+        para = " ".join(line.strip() for line in para_lines).strip()
+        para_lines.clear()
+        return para or None
+
+    with path.open("r", encoding="utf-8", errors="replace") as f:
+        for raw_line in f:
+            line = raw_line.rstrip("\n")
+            if not line.strip():
+                para = flush_paragraph()
+                if para is None:
+                    continue
+
+                chunk_paras.append(para)
+                chunk_tokens += _count_tokens(para)
+
+                if chunk_tokens >= min_tokens:
+                    chunk = "\n\n".join(chunk_paras).strip()
+                    chunk_paras.clear()
+                    chunk_tokens = 0
+
+                    if chunk and len(chunk) >= min_chars:
+                        if prev_chunk is not None:
+                            yield prev_chunk
+                        prev_chunk = chunk
+                continue
+
+            para_lines.append(line)
+
+    # Flush final paragraph (EOF might not end with a blank line).
+    para = flush_paragraph()
+    if para is not None:
+        chunk_paras.append(para)
+        chunk_tokens += _count_tokens(para)
+
+    tail = "\n\n".join(chunk_paras).strip()
+    if tail and len(tail) >= min_chars:
+        if prev_chunk is not None:
+            prev_chunk = (prev_chunk + "\n\n" + tail).strip()
+        else:
+            prev_chunk = tail
+
+    if prev_chunk is not None:
+        yield prev_chunk
 
 
 def _load_titles(metadata_csv: Path) -> dict[int, str]:
@@ -53,7 +128,7 @@ def _embed_batch(*, api_key: str, model: str, texts: list[str]) -> list[np.ndarr
     if any((not isinstance(t, str)) or (not t.strip()) for t in texts):
         raise ValueError("Embedding batch contains empty text.")
 
-    resp = requests.post(
+    resp = _get_requests_session().post(
         "https://api.openai.com/v1/embeddings",
         headers={"Authorization": f"Bearer {api_key}"},
         json={"model": model, "input": texts, "encoding_format": "float"},
@@ -130,6 +205,55 @@ def _create_schema(conn: sqlite3.Connection, *, table: str, overwrite: bool) -> 
     conn.commit()
 
 
+def _embed_and_insert(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    api_key: str,
+    model: str,
+    rows: list[ParagraphRow],
+) -> None:
+    payload = _embed_payload(api_key=api_key, model=model, rows=rows)
+    _insert_payload(conn, table=table, payload=payload)
+
+
+def _embed_payload(*, api_key: str, model: str, rows: list[ParagraphRow]) -> list[tuple]:
+    texts = [r.paragraph_text for r in rows]
+    vecs = _retry_embed_batch(api_key=api_key, model=model, texts=texts)
+
+    payload = []
+    for r, v in zip(rows, vecs, strict=True):
+        payload.append(
+            (
+                int(r.embed_id),
+                r.paragraph_text,
+                int(r.prev_embed_id) if r.prev_embed_id is not None else None,
+                int(r.next_embed_id) if r.next_embed_id is not None else None,
+                v.astype(np.float32).tobytes(),
+                r.book_title,
+                int(r.book_id) if r.book_id is not None else None,
+            )
+        )
+    return payload
+
+
+def _insert_payload(conn: sqlite3.Connection, *, table: str, payload: list[tuple]) -> None:
+    conn.executemany(
+        f"""
+        INSERT OR REPLACE INTO {table} (
+          embed_id,
+          paragraph_text,
+          prev_embed_id,
+          next_embed_id,
+          embedding,
+          book_title,
+          book_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        payload,
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build embedding.db from Gutenberg text/ files.")
     parser.add_argument("--text-dir", default="gutenberg/data/text", help="Directory of PG*_text.txt files.")
@@ -138,6 +262,20 @@ def main() -> None:
     parser.add_argument("--table", default=os.environ.get("EMBEDDINGS_TABLE", "embeddings"))
     parser.add_argument("--model", default=os.environ.get("OPENAI_EMBED_MODEL", "text-embedding-3-small"))
     parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=int(os.environ.get("EMBED_CONCURRENCY", "1")),
+        help="Number of concurrent embedding requests.",
+    )
+    parser.add_argument(
+        "--max-inflight",
+        type=int,
+        default=0,
+        help="Max embedding batches in flight; 0 defaults to 2*concurrency.",
+    )
+    parser.add_argument("--max-books", type=int, default=0, help="0 means no limit.")
+    parser.add_argument("--min-tokens", type=int, default=50)
     parser.add_argument("--min-chars", type=int, default=1)
     parser.add_argument("--max-paragraphs", type=int, default=0, help="0 means no limit.")
     parser.add_argument("--overwrite", action="store_true", help="Drop and recreate the embeddings table.")
@@ -157,84 +295,145 @@ def main() -> None:
 
     titles = _load_titles(metadata_csv)
 
-    rows: list[ParagraphRow] = []
-    next_embed_id = 1
-    for book_id, path in _iter_text_files(text_dir):
-        title = titles.get(book_id)
-        text = path.read_text(encoding="utf-8", errors="replace")
-        paras_all = _split_paragraphs(text)
-        paras = [p for p in paras_all if len(p) >= int(args.min_chars)]
-        if not paras:
-            continue
-
-        start = next_embed_id
-        end = start + len(paras) - 1
-        for i, para in enumerate(paras):
-            embed_id = start + i
-            prev_id = embed_id - 1 if embed_id > start else None
-            next_id = embed_id + 1 if embed_id < end else None
-            rows.append(
-                ParagraphRow(
-                    embed_id=embed_id,
-                    paragraph_text=para,
-                    prev_embed_id=prev_id,
-                    next_embed_id=next_id,
-                    book_title=title,
-                    book_id=book_id,
-                )
-            )
-
-        next_embed_id = end + 1
-        if args.max_paragraphs and len(rows) >= int(args.max_paragraphs):
-            rows = rows[: int(args.max_paragraphs)]
-            break
-
-    if not rows:
-        raise SystemExit(f"No paragraphs found in {text_dir}.")
-
     out_db.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(str(out_db)) as conn:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         _create_schema(conn, table=args.table, overwrite=bool(args.overwrite))
 
+        batch_size = max(1, int(args.batch_size))
+        concurrency = max(1, int(args.concurrency))
+        max_inflight = int(args.max_inflight)
+        if max_inflight <= 0:
+            max_inflight = max(1, 2 * concurrency)
+        min_tokens = max(1, int(args.min_tokens))
+        min_chars = max(1, int(args.min_chars))
+        max_paragraphs = max(0, int(args.max_paragraphs))
+
+        max_books = max(0, int(args.max_books))
+        text_files = list(_iter_text_files(text_dir))
+        if max_books:
+            text_files = text_files[:max_books]
+        total_books = len(text_files)
+        if total_books == 0:
+            raise SystemExit(f"No PG*_text.txt files found in {text_dir}.")
+
+        batch: list[ParagraphRow] = []
         inserted = 0
-        for i in range(0, len(rows), int(args.batch_size)):
-            batch = rows[i : i + int(args.batch_size)]
-            texts = [r.paragraph_text for r in batch]
-            vecs = _retry_embed_batch(api_key=api_key, model=args.model, texts=texts)
+        seen = 0
+        next_embed_id = 1
 
-            payload = []
-            for r, v in zip(batch, vecs, strict=True):
-                payload.append(
-                    (
-                        int(r.embed_id),
-                        r.paragraph_text,
-                        int(r.prev_embed_id) if r.prev_embed_id is not None else None,
-                        int(r.next_embed_id) if r.next_embed_id is not None else None,
-                        sqlite3.Binary(v.astype(np.float32).tobytes()),
-                        r.book_title,
-                        int(r.book_id) if r.book_id is not None else None,
-                    )
-                )
-
-            conn.executemany(
-                f"""
-                INSERT OR REPLACE INTO {args.table} (
-                  embed_id,
-                  paragraph_text,
-                  prev_embed_id,
-                  next_embed_id,
-                  embedding,
-                  book_title,
-                  book_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                payload,
-            )
+        # Embed + insert: optionally in parallel (embedding requests only; SQLite writes stay single-threaded).
+        def insert_one_payload(payload: list[tuple]) -> None:
+            nonlocal inserted
+            _insert_payload(conn, table=args.table, payload=payload)
             conn.commit()
-            inserted += len(batch)
-            print(f"Embedded {inserted}/{len(rows)} paragraphs", end="\r")
+            inserted += len(payload)
+            print(f"Books {books_done}/{total_books} | Embedded {inserted} paragraphs", end="\r")
+
+        inflight: set[concurrent.futures.Future[list[tuple]]] = set()
+        books_done = 0
+
+        def drain_one(*, pool: concurrent.futures.Executor) -> None:
+            done, _ = concurrent.futures.wait(inflight, return_when=concurrent.futures.FIRST_COMPLETED)
+            for fut in done:
+                inflight.remove(fut)
+                insert_one_payload(fut.result())
+
+        def drain_all(*, pool: concurrent.futures.Executor) -> None:
+            for fut in concurrent.futures.as_completed(list(inflight)):
+                inflight.remove(fut)
+                insert_one_payload(fut.result())
+
+        def submit_batch(*, pool: concurrent.futures.Executor | None, rows: list[ParagraphRow]) -> None:
+            if not rows:
+                return
+            if pool is None:
+                insert_one_payload(_embed_payload(api_key=api_key, model=args.model, rows=rows))
+                return
+            inflight.add(pool.submit(_embed_payload, api_key=api_key, model=args.model, rows=rows))
+            if len(inflight) >= max_inflight:
+                drain_one(pool=pool)
+
+        pool: concurrent.futures.Executor | None
+        if concurrency <= 1:
+            pool = None
+        else:
+            pool = concurrent.futures.ThreadPoolExecutor(max_workers=concurrency)
+
+        try:
+            for book_id, path in text_files:
+                title = titles.get(book_id)
+
+                pending: ParagraphRow | None = None
+                prev_embed_id: int | None = None
+
+                for para in _iter_paragraphs_from_file(path, min_tokens=min_tokens, min_chars=min_chars):
+                    if max_paragraphs and seen >= max_paragraphs:
+                        break
+                    seen += 1
+
+                    embed_id = next_embed_id
+                    next_embed_id += 1
+
+                    if pending is not None:
+                        batch.append(
+                            ParagraphRow(
+                                embed_id=pending.embed_id,
+                                paragraph_text=pending.paragraph_text,
+                                prev_embed_id=pending.prev_embed_id,
+                                next_embed_id=embed_id,
+                                book_title=pending.book_title,
+                                book_id=pending.book_id,
+                            )
+                        )
+                        if len(batch) >= batch_size:
+                            submit_batch(pool=pool, rows=batch)
+                            batch = []
+
+                    pending = ParagraphRow(
+                        embed_id=embed_id,
+                        paragraph_text=para,
+                        prev_embed_id=prev_embed_id,
+                        next_embed_id=None,
+                        book_title=title,
+                        book_id=book_id,
+                    )
+                    prev_embed_id = embed_id
+
+                if pending is not None and (not max_paragraphs or seen <= max_paragraphs):
+                    batch.append(
+                        ParagraphRow(
+                            embed_id=pending.embed_id,
+                            paragraph_text=pending.paragraph_text,
+                            prev_embed_id=pending.prev_embed_id,
+                            next_embed_id=None,
+                            book_title=pending.book_title,
+                            book_id=pending.book_id,
+                        )
+                    )
+                    if len(batch) >= batch_size:
+                        submit_batch(pool=pool, rows=batch)
+                        batch = []
+
+                books_done += 1
+                print(f"Books {books_done}/{total_books} | Embedded {inserted} paragraphs", end="\r")
+
+                if max_paragraphs and seen >= max_paragraphs:
+                    break
+
+            if batch:
+                submit_batch(pool=pool, rows=batch)
+                batch = []
+
+            if pool is not None:
+                drain_all(pool=pool)
+        finally:
+            if pool is not None:
+                pool.shutdown(wait=False, cancel_futures=True)
+
+        if inserted == 0:
+            raise SystemExit(f"No paragraphs found in {text_dir}.")
 
     print()
     print(f"OK: wrote {inserted} rows to {out_db} (table: {args.table}, model: {args.model})")
@@ -242,4 +441,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
