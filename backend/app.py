@@ -30,6 +30,7 @@ class AppConfig:
     static_dir: Optional[Path]
     hnsw_enabled: bool
     hnsw_warm_build: bool
+    hnsw_index_path: Path
     hnsw_m: int
     hnsw_ef_construction: int
     hnsw_ef_search: int
@@ -76,6 +77,53 @@ def _connect_sqlite(path: Path) -> sqlite3.Connection:
 def _file_signature(path: Path) -> Tuple[int, int]:
     stat = path.stat()
     return int(stat.st_mtime_ns), int(stat.st_size)
+
+
+def _db_signature(*, db_path: Path, embeddings_table: str) -> Dict[str, Any]:
+    with _connect_sqlite(db_path) as conn:
+        if not _has_table(conn, embeddings_table):
+            raise RuntimeError(
+                f"Embedding DB missing table '{embeddings_table}'. Found: {_table_names(conn)}"
+            )
+        row = conn.execute(
+            f"SELECT length(embedding) AS blob_len FROM {embeddings_table} "
+            "WHERE embedding IS NOT NULL LIMIT 1"
+        ).fetchone()
+        if row is None or row["blob_len"] is None:
+            raise RuntimeError("No embeddings found to build HNSW index.")
+        blob_len = int(row["blob_len"])
+        if blob_len % 4 != 0:
+            raise RuntimeError(f"Unexpected embedding blob length: {blob_len}")
+        dim = blob_len // 4
+
+        count_row = conn.execute(
+            f"SELECT COUNT(*) AS n FROM {embeddings_table} WHERE embedding IS NOT NULL"
+        ).fetchone()
+        total = int(count_row["n"]) if count_row and count_row["n"] is not None else 0
+
+        data_version = conn.execute("PRAGMA data_version").fetchone()[0]
+        schema_version = conn.execute("PRAGMA schema_version").fetchone()[0]
+        page_count = conn.execute("PRAGMA page_count").fetchone()[0]
+        freelist_count = conn.execute("PRAGMA freelist_count").fetchone()[0]
+        user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+
+    mtime_ns, size = _file_signature(db_path)
+    return {
+        "mtime_ns": int(mtime_ns),
+        "size": int(size),
+        "data_version": int(data_version),
+        "schema_version": int(schema_version),
+        "page_count": int(page_count),
+        "freelist_count": int(freelist_count),
+        "user_version": int(user_version),
+        "embeddings_table": embeddings_table,
+        "row_count": int(total),
+        "dim": int(dim),
+    }
+
+
+def _sig_path(index_path: Path) -> Path:
+    return index_path.with_suffix(index_path.suffix + ".sig.json")
 
 
 def _table_names(conn: sqlite3.Connection) -> List[str]:
@@ -189,42 +237,26 @@ def _build_hnsw_index(
     ef_construction: int,
     ef_search: int,
     log_every: int,
+    index_path: Optional[Path],
 ) -> Tuple["hnswlib.Index", Tuple[int, int]]:
     if hnswlib is None:
         raise RuntimeError("hnswlib is not installed; disable HNSW or add the dependency.")
+    signature = _db_signature(db_path=embedding_db_path, embeddings_table=embeddings_table)
+    dim = int(signature["dim"])
+    total = int(signature["row_count"])
+    if total <= 0:
+        raise RuntimeError("No embeddings found to build HNSW index.")
+
+    index = hnswlib.Index(space="cosine", dim=dim)
+    index.init_index(max_elements=total, ef_construction=ef_construction, M=m)
+
+    batch_ids: List[int] = []
+    batch_vecs: List[np.ndarray] = []
+    batch_size = 10000
+    processed = 0
+    log_every = max(int(log_every), 0)
+
     with _connect_sqlite(embedding_db_path) as conn:
-        if not _has_table(conn, embeddings_table):
-            raise RuntimeError(
-                f"Embedding DB missing table '{embeddings_table}'. Found: {_table_names(conn)}"
-            )
-
-        row = conn.execute(
-            f"SELECT length(embedding) AS blob_len FROM {embeddings_table} "
-            "WHERE embedding IS NOT NULL LIMIT 1"
-        ).fetchone()
-        if row is None or row["blob_len"] is None:
-            raise RuntimeError("No embeddings found to build HNSW index.")
-        blob_len = int(row["blob_len"])
-        if blob_len % 4 != 0:
-            raise RuntimeError(f"Unexpected embedding blob length: {blob_len}")
-        dim = blob_len // 4
-
-        count_row = conn.execute(
-            f"SELECT COUNT(*) AS n FROM {embeddings_table} WHERE embedding IS NOT NULL"
-        ).fetchone()
-        total = int(count_row["n"]) if count_row and count_row["n"] is not None else 0
-        if total <= 0:
-            raise RuntimeError("No embeddings found to build HNSW index.")
-
-        index = hnswlib.Index(space="cosine", dim=dim)
-        index.init_index(max_elements=total, ef_construction=ef_construction, M=m)
-
-        batch_ids: List[int] = []
-        batch_vecs: List[np.ndarray] = []
-        batch_size = 10000
-        processed = 0
-        log_every = max(int(log_every), 0)
-
         for row in conn.execute(
             f"SELECT embed_id, embedding FROM {embeddings_table} WHERE embedding IS NOT NULL"
         ):
@@ -244,15 +276,45 @@ def _build_hnsw_index(
                 batch_ids = []
                 batch_vecs = []
 
-        if batch_ids:
-            index.add_items(np.vstack(batch_vecs), np.asarray(batch_ids, dtype=np.int64))
-            processed += len(batch_ids)
-            if log_every:
-                print(f"[hnsw] indexed {processed}/{total} vectors")
+    if batch_ids:
+        index.add_items(np.vstack(batch_vecs), np.asarray(batch_ids, dtype=np.int64))
+        processed += len(batch_ids)
+        if log_every:
+            print(f"[hnsw] indexed {processed}/{total} vectors")
 
-        index.set_ef(max(ef_search, 1))
+    index.set_ef(max(ef_search, 1))
+
+    if index_path is not None:
+        sig_path = _sig_path(index_path)
+        index.save_index(str(index_path))
+        sig_path.write_text(json.dumps(signature, indent=2), encoding="utf-8")
 
     return index, _file_signature(embedding_db_path)
+
+
+def _load_hnsw_index(
+    *,
+    index_path: Path,
+    embedding_db_path: Path,
+    embeddings_table: str,
+    ef_search: int,
+) -> Optional["hnswlib.Index"]:
+    if hnswlib is None:
+        return None
+    sig_path = _sig_path(index_path)
+    if not index_path.exists() or not sig_path.exists():
+        return None
+    try:
+        on_disk_sig = json.loads(sig_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    current_sig = _db_signature(db_path=embedding_db_path, embeddings_table=embeddings_table)
+    if on_disk_sig != current_sig:
+        return None
+    index = hnswlib.Index(space="cosine", dim=int(current_sig["dim"]))
+    index.load_index(str(index_path))
+    index.set_ef(max(ef_search, 1))
+    return index
 
 
 def _search_embeddings_ann(
@@ -537,8 +599,14 @@ def _load_saved_query(
 
 def create_app() -> Flask:
     root = _repo_root()
+    embedding_db_path = _env_path("EMBEDDING_DB_PATH", root / "embedding.db", root=root)
+    default_hnsw_index_path = _env_path(
+        "HNSW_INDEX_PATH",
+        embedding_db_path.with_suffix(".hnsw"),
+        root=root,
+    )
     config = AppConfig(
-        embedding_db_path=_env_path("EMBEDDING_DB_PATH", root / "embedding.db", root=root),
+        embedding_db_path=embedding_db_path,
         queries_db_path=_env_path("QUERIES_DB_PATH", root / "queries.db", root=root),
         embeddings_table=os.environ.get("EMBEDDINGS_TABLE", "embeddings"),
         jina_api_key=os.environ.get("JINA_API_KEY"),
@@ -548,6 +616,7 @@ def create_app() -> Flask:
         static_dir=_env_optional_path("STATIC_DIR", root=root),
         hnsw_enabled=_env_bool("HNSW_ENABLED", True),
         hnsw_warm_build=_env_bool("HNSW_WARM_BUILD", True),
+        hnsw_index_path=default_hnsw_index_path,
         hnsw_m=int(os.environ.get("HNSW_M", "16")),
         hnsw_ef_construction=int(os.environ.get("HNSW_EF_CONSTRUCTION", "200")),
         hnsw_ef_search=int(os.environ.get("HNSW_EF_SEARCH", "64")),
@@ -571,17 +640,29 @@ def create_app() -> Flask:
             with state["lock"]:
                 try:
                     print("[hnsw] warm build start")
-                    index, file_sig = _build_hnsw_index(
+                    loaded = _load_hnsw_index(
+                        index_path=config.hnsw_index_path,
                         embedding_db_path=config.embedding_db_path,
                         embeddings_table=config.embeddings_table,
-                        m=config.hnsw_m,
-                        ef_construction=config.hnsw_ef_construction,
                         ef_search=config.hnsw_ef_search,
-                        log_every=config.hnsw_log_every,
                     )
-                    state["index"] = index
-                    state["file_sig"] = file_sig
-                    print("[hnsw] warm build complete")
+                    if loaded is not None:
+                        state["index"] = loaded
+                        state["file_sig"] = _file_signature(config.embedding_db_path)
+                        print("[hnsw] warm build loaded from disk")
+                    else:
+                        index, file_sig = _build_hnsw_index(
+                            embedding_db_path=config.embedding_db_path,
+                            embeddings_table=config.embeddings_table,
+                            m=config.hnsw_m,
+                            ef_construction=config.hnsw_ef_construction,
+                            ef_search=config.hnsw_ef_search,
+                            log_every=config.hnsw_log_every,
+                            index_path=config.hnsw_index_path,
+                        )
+                        state["index"] = index
+                        state["file_sig"] = file_sig
+                        print("[hnsw] warm build complete")
                 except Exception as exc:
                     print(f"[hnsw] warm build failed: {exc}")
 
@@ -600,6 +681,7 @@ def create_app() -> Flask:
                 "has_jina_api_key": bool(cfg.jina_api_key),
                 "hnsw_enabled": cfg.hnsw_enabled,
                 "hnsw_warm_build": cfg.hnsw_warm_build,
+                "hnsw_index_path": str(cfg.hnsw_index_path),
             }
         )
 
@@ -660,14 +742,25 @@ def create_app() -> Flask:
                 if index is None or state["file_sig"] != file_sig:
                     with state["lock"]:
                         if state["index"] is None or state["file_sig"] != file_sig:
-                            index, file_sig = _build_hnsw_index(
+                            loaded = _load_hnsw_index(
+                                index_path=cfg.hnsw_index_path,
                                 embedding_db_path=cfg.embedding_db_path,
                                 embeddings_table=cfg.embeddings_table,
-                                m=cfg.hnsw_m,
-                                ef_construction=cfg.hnsw_ef_construction,
                                 ef_search=cfg.hnsw_ef_search,
-                                log_every=cfg.hnsw_log_every,
                             )
+                            if loaded is not None:
+                                index = loaded
+                                file_sig = _file_signature(cfg.embedding_db_path)
+                            else:
+                                index, file_sig = _build_hnsw_index(
+                                    embedding_db_path=cfg.embedding_db_path,
+                                    embeddings_table=cfg.embeddings_table,
+                                    m=cfg.hnsw_m,
+                                    ef_construction=cfg.hnsw_ef_construction,
+                                    ef_search=cfg.hnsw_ef_search,
+                                    log_every=cfg.hnsw_log_every,
+                                    index_path=cfg.hnsw_index_path,
+                                )
                             state["index"] = index
                             state["file_sig"] = file_sig
                 results = _search_embeddings_ann(
