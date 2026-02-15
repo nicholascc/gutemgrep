@@ -87,6 +87,23 @@ export async function listVectors({ ids }) {
   return data;
 }
 
+export async function mutateText({ text, instruction }) {
+  const resp = await fetch("/mutate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text, instruction })
+  });
+  const data = await resp.json().catch(() => null);
+  if (!resp.ok) {
+    const message = data?.error || `Request failed (${resp.status})`;
+    throw new Error(message);
+  }
+  if (data?.ok === false) {
+    throw new Error(data?.error || "Request failed");
+  }
+  return data;
+}
+
 export async function queryByVector({ vectorId, topK = 10, includeContext = true }) {
   const resp = await fetch("/query/by-vector", {
     method: "POST",
